@@ -7,8 +7,111 @@
  */
 """
 
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+from aiogram import Bot
+from src.infra.config.settings import get_settings
+
+if TYPE_CHECKING:
+    from src.infra.db.models import AppointmentModel
+
 
 class ReminderService:
-    def schedule_reminders(self, appointment_id: int) -> None:
-        # TODO: подключить APScheduler и реальную отправку уведомлений.
-        _ = appointment_id
+    @staticmethod
+    def _resolve_timezone(raw_tz: str):
+        value = (raw_tz or "").strip()
+        if not value:
+            return ZoneInfo("Europe/Minsk")
+
+        # Поддерживаем числовые форматы: "3", "+3", "-5", а также "UTC+3", "GMT+3".
+        match = re.fullmatch(r"(?:(?:UTC|GMT)\s*)?([+-]?\d{1,2})", value, flags=re.IGNORECASE)
+        if match:
+            hours = int(match.group(1))
+            if -23 <= hours <= 23:
+                return timezone(timedelta(hours=hours))
+
+        # Иначе пытаемся интерпретировать как IANA timezone, например Europe/Minsk.
+        try:
+            return ZoneInfo(value)
+        except Exception:
+            # Безопасный fallback для проекта.
+            return ZoneInfo("Europe/Minsk")
+
+    def __init__(self) -> None:
+        from src.infra.db.repositories.appointments_repository import AppointmentsRepository
+        from src.infra.db.repositories.reminder_jobs_repository import ReminderJobsRepository
+
+        self._appointments_repo = AppointmentsRepository()
+        self._jobs_repo = ReminderJobsRepository()
+        settings = get_settings()
+        self._app_timezone = self._resolve_timezone(settings.app_timezone)
+        self._offset_24h_minutes = settings.reminder_24h_offset_minutes
+        self._offset_2h_minutes = settings.reminder_2h_offset_minutes
+
+    def _appointment_dt_local(self, appointment: "AppointmentModel") -> datetime:
+        # Время записи интерпретируется как локальное время барбера.
+        return datetime.combine(
+            appointment.date,
+            appointment.time_slot,
+            tzinfo=self._app_timezone,
+        )
+
+    def _remind_times_from_appointment_dt(self, appt_dt_utc: datetime) -> list[tuple[str, datetime]]:
+        return [
+            ("24h", appt_dt_utc - timedelta(minutes=self._offset_24h_minutes)),
+            ("2h", appt_dt_utc - timedelta(minutes=self._offset_2h_minutes)),
+        ]
+
+    async def schedule_reminders(self, appointment: "AppointmentModel") -> None:
+        now = datetime.now(timezone.utc)
+        appt_dt_local = self._appointment_dt_local(appointment)
+        reminds = self._remind_times_from_appointment_dt(appt_dt_local)
+
+        # Планируем только будущие напоминания, чтобы не спамить сразу после создания.
+        for remind_type, remind_at in reminds:
+            remind_at_utc = remind_at.astimezone(timezone.utc)
+            if remind_at_utc <= now:
+                continue
+            await self._jobs_repo.insert_for_appointment(
+                appointment_id=appointment.id,
+                user_id=appointment.user_id,
+                remind_type=remind_type,
+                remind_at=remind_at_utc,
+            )
+
+    async def send_due_reminders(self, bot: Bot) -> None:
+        now = datetime.now(timezone.utc)
+        due = await self._jobs_repo.fetch_due_unsent(now)
+        if not due:
+            return
+
+        for job in due:
+            reminder_job_id = int(job["id"])
+            appointment_id = int(job["appointment_id"])
+            user_id = int(job["user_id"])
+
+            appointment = await self._appointments_repo.get_by_id(appointment_id)
+            if appointment is None or appointment.status != "confirmed":
+                # Если запись отменена/удалена, закрываем job, чтобы не крутить ее бесконечно.
+                await self._jobs_repo.mark_sent(reminder_job_id)
+                continue
+
+            text = (
+                f"Напоминание: вы записаны на {appointment.date.strftime('%d.%m.%Y')} "
+                f"в {appointment.time_slot.strftime('%H:%M')}."
+            )
+
+            try:
+                await bot.send_message(user_id, text)
+                await self._jobs_repo.mark_sent(reminder_job_id)
+            except Exception:
+                # Не отмечаем sent_at, чтобы можно было повторить на следующем цикле.
+                continue
+
+    async def cancel_future_reminders_for_appointment(self, appointment_id: int) -> None:
+        await self._jobs_repo.mark_all_unsent_for_appointment_as_sent(appointment_id)

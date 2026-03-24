@@ -124,3 +124,62 @@
 - В `ScheduleService` изменен шаг слота `DEFAULT_STEP_MINUTES` на `60`.
 - В `src/bot/keyboards/booking.py` изменен layout inline-клавиатур: даты и слоты отображаются по 3 кнопки в ряд.
 - В `docs/TZ_MVP.md` обновлено описание длительности слота до 60 минут.
+
+## [2026-03-23] Реализованы must-have напоминания
+
+### Добавлено
+- Табличный контур `reminder_jobs` (SQL выполнен в Supabase).
+- `ReminderJobsRepository` для планирования и отправки due/unsent напоминаний.
+- `ReminderService`: планирование 24ч и 2ч после подтверждения записи и отправка due напоминаний.
+- Периодический воркер в `src/main.py` через `AsyncIOScheduler` (каждые 60 секунд).
+- Связка планирования напоминаний из `BookingService` после создания appointment.
+- Unit-тест `tests/unit/test_reminder_service.py` для расчёта времени.
+
+### Изменено
+- `docs/Tasktracker.md`: задача напоминаний переведена в `В процессе`.
+- `docs/Diary.md`: добавлена запись о реализации must-have напоминаний.
+
+## [2026-03-23] Доработка напоминаний при отмене записи
+
+### Добавлено
+- Очистка unsent `reminder_jobs` при отмене активной записи.
+- Воркер помечает jobs как sent для отмененных/недоступных appointments.
+
+### Изменено
+- `BookingService.cancel_active_appointment()` теперь деактивирует будущие напоминания.
+- `docs/Tasktracker.md` и `docs/Diary.md` обновлены под текущий статус этапа.
+
+## [2026-03-24] Исправлен запуск воркера напоминаний
+
+### Исправлено
+- Устранена ошибка APScheduler `RuntimeError: no running event loop`.
+- В `src/main.py` scheduler job переведен на async-вызов без `asyncio.create_task` в sync-контексте.
+
+## [2026-03-24] Test mode для напоминаний через env offsets
+
+### Добавлено
+- Параметры конфигурации:
+  - `REMINDER_24H_OFFSET_MINUTES`
+  - `REMINDER_2H_OFFSET_MINUTES`
+- `.env.example` дополнен значениями по умолчанию (1440 и 120).
+- Unit-тест `test_reminder_service.py` на переопределение offsets через env.
+
+### Изменено
+- `ReminderService` переведен на offsets в минутах из `Settings`.
+
+## [2026-03-24] Timezone напоминаний UTC+3
+
+### Добавлено
+- Параметр `APP_TIMEZONE` в конфигурации и `.env.example` (по умолчанию `Europe/Minsk`).
+
+### Изменено
+- Расчет времени напоминаний переведен на timezone барбера (локальное время), хранение в БД остается в UTC.
+
+## [2026-03-24] APP_TIMEZONE поддерживает числовой формат
+
+### Добавлено
+- Поддержка значений `APP_TIMEZONE`: `3`, `+3`, `UTC+3`, `GMT+3` (помимо `Europe/Minsk`).
+- Unit-тест на числовой timezone offset.
+
+### Изменено
+- `.env.example` дополнен примерами форматов `APP_TIMEZONE`.

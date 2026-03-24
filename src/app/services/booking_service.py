@@ -14,6 +14,7 @@ from datetime import date
 from typing import Optional
 
 from src.app.services.schedule_service import ScheduleService
+from src.app.services.reminder_service import ReminderService
 from src.infra.db.models import AppointmentModel, UserModel
 from src.infra.db.repositories.appointments_repository import (
     AppointmentsRepository,
@@ -36,6 +37,7 @@ class BookingService:
         self._schedule_service = ScheduleService()
         self._users_repo = UsersRepository()
         self._appointments_repo = AppointmentsRepository()
+        self._reminder_service = ReminderService()
 
     async def get_user(self, user_id: int) -> Optional[UserModel]:
         return await self._users_repo.get_by_user_id(user_id)
@@ -66,14 +68,19 @@ class BookingService:
             )
 
         try:
-            return await self._appointments_repo.create_confirmed(
+            appointment = await self._appointments_repo.create_confirmed(
                 user_id=user_id,
                 target_date=target_date,
                 time_slot_hhmm=time_slot_hhmm,
             )
+            await self._reminder_service.schedule_reminders(appointment)
+            return appointment
         except SlotUnavailableError:
             # Пробрасываем исходный смысл исключения наверх.
             raise
 
     async def cancel_active_appointment(self, user_id: int) -> Optional[AppointmentModel]:
-        return await self._appointments_repo.cancel_active_for_user(user_id)
+        cancelled = await self._appointments_repo.cancel_active_for_user(user_id)
+        if cancelled is not None:
+            await self._reminder_service.cancel_future_reminders_for_appointment(cancelled.id)
+        return cancelled

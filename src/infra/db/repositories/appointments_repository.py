@@ -256,3 +256,37 @@ class AppointmentsRepository:
             )
         return out
 
+    async def get_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        def _op() -> Optional[dict]:
+            client = get_supabase_client()
+            res = (
+                client.table("appointments")
+                .select("id,user_id,date,time_slot,status,created_at")
+                .eq("id", appointment_id)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+
+        row = await asyncio.to_thread(_op)
+        if not row:
+            return None
+
+        created_at = row.get("created_at")
+        if isinstance(created_at, str):
+            created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        else:
+            created_at_dt = created_at
+
+        slot = str(row["time_slot"])
+        slot_time = time.fromisoformat(slot[:5]) if len(slot) >= 5 else time.fromisoformat(slot)
+
+        return AppointmentModel(
+            id=int(row["id"]),
+            user_id=int(row["user_id"]),
+            date=date.fromisoformat(str(row["date"])),
+            time_slot=slot_time,
+            status=str(row["status"]),
+            created_at=created_at_dt,
+        )
+

@@ -10,11 +10,13 @@
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.bot import DefaultBotProperties
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.bot.handlers.admin import router as admin_router
 from src.bot.handlers.appointment import router as appointment_router
 from src.bot.handlers.booking import router as booking_router
 from src.bot.handlers.start import router as start_router
+from src.app.services.reminder_service import ReminderService
 from src.infra.config.settings import get_settings
 
 
@@ -34,6 +36,18 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dispatcher = build_dispatcher()
+
+    # Воркер напоминаний (MVP): раз в 60 секунд ищем due/unsent записи в Supabase
+    # и отправляем сообщения клиентам. Это переживает рестарты бота.
+    reminder_service = ReminderService()
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    async def _schedule_job() -> None:
+        await reminder_service.send_due_reminders(bot)
+
+    scheduler.add_job(_schedule_job, trigger="interval", seconds=60, max_instances=1, coalesce=True)
+    scheduler.start()
+
     await dispatcher.start_polling(bot)
 
 

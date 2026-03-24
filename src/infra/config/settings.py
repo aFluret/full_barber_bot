@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     admin_user_ids: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""
+    app_timezone: str = "Europe/Minsk"
+    reminder_24h_offset_minutes: int = 24 * 60
+    reminder_2h_offset_minutes: int = 2 * 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
