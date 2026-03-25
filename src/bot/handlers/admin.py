@@ -11,21 +11,52 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.infra.config.settings import get_settings
 from src.infra.db.repositories.appointments_repository import AppointmentsRepository
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepository
 from src.app.services.schedule_service import ScheduleService
+from src.bot.handlers.states import AdminPanelStates
 
 router = Router()
 appointments_repo = AppointmentsRepository()
 users_repo = UsersRepository()
 work_schedule_repo = WorkScheduleRepository()
 schedule_service = ScheduleService()
+
+def _admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Расписание барбера",
+                    callback_data="admin_panel:schedule",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Приёмы на сегодня",
+                    callback_data="admin_panel:today_appointments",
+                )
+            ],
+        ]
+    )
+
+
+async def _safe_edit_admin_panel(callback: CallbackQuery, text: str) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=_admin_panel_keyboard())
+    except TelegramBadRequest as e:
+        # Частый кейс: "message is not modified" или сообщение недоступно.
+        if "message is not modified" in str(e).lower():
+            return
+        await callback.message.answer(text, reply_markup=_admin_panel_keyboard())
 
 
 def _is_admin(user_id: int) -> bool:
@@ -202,3 +233,93 @@ async def set_work_schedule(message: Message) -> None:
         f"- start: {start_t.strftime('%H:%M')}\n"
         f"- end: {end_t.strftime('%H:%M')}"
     )
+
+
+@router.message(Command("admin"))
+async def admin_panel_entry(message: Message, state: FSMContext) -> None:
+    await state.set_state(AdminPanelStates.waiting_access_code)
+    await message.answer("Введите код доступа")
+
+
+@router.message(AdminPanelStates.waiting_access_code)
+async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
+    code = (message.text or "").strip()
+    settings = get_settings()
+    expected = (settings.admin_panel_access_code or "").strip()
+
+    if not code or code != expected:
+        await message.answer("Неверный код доступа. Попробуйте еще раз.")
+        return
+
+    await state.set_state(AdminPanelStates.in_menu)
+    await message.answer(
+        "Админ-панель открыта. Выберите пункт:",
+        reply_markup=_admin_panel_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin_panel:schedule")
+async def admin_panel_show_schedule(callback: CallbackQuery, state: FSMContext) -> None:
+    # Фоллбек-страховка: если callback пришел не в ожидаемом состоянии.
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+
+    schedule = await work_schedule_repo.get_latest()
+    if schedule is None:
+        weekdays = sorted(schedule_service.WORKING_WEEKDAYS)
+        start_time = ScheduleService.DEFAULT_START
+        end_time = ScheduleService.DEFAULT_END
+    else:
+        weekdays = sorted(schedule.weekdays)
+        start_time = schedule.start_time.strftime("%H:%M")
+        end_time = schedule.end_time.strftime("%H:%M")
+
+    weekdays_human = ",".join(str(d + 1) for d in weekdays)
+
+    today = date.today()
+    slots_today = await schedule_service.get_candidate_slots_for_date(today)
+    today_is_working = today.weekday() in set(weekdays)
+
+    slots_text = ", ".join(slots_today) if slots_today else "-"
+
+    await _safe_edit_admin_panel(
+        callback,
+        "Расписание барбера:\n"
+        f"- дни: {weekdays_human} (1=Пн ... 7=Вс)\n"
+        f"- время: {start_time} - {end_time}\n"
+        f"- сегодня: {'рабочий' if today_is_working else 'нерабочий'}\n"
+        f"- слоты на сегодня: {slots_text}",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel:today_appointments")
+async def admin_panel_show_today_appointments(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+
+    appts = await appointments_repo.list_by_date_from_today(date.today())
+    if not appts:
+        text = "Приёмы на сегодня: записей нет."
+        await _safe_edit_admin_panel(callback, text)
+        await callback.answer()
+        return
+
+    lines: list[str] = []
+    for appt in appts:
+        user = await users_repo.get_by_user_id(appt.user_id)
+        if user is None:
+            continue
+        lines.append(
+            _format_line(
+                time_slot=appt.time_slot.strftime("%H:%M"),
+                name=user.name,
+                phone=user.phone,
+            )
+        )
+
+    text = "Приёмы на сегодня:\n" + ("\n".join(lines) if lines else "Записей нет.")
+    await _safe_edit_admin_panel(callback, text)
+    await callback.answer()

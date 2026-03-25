@@ -20,3 +20,8 @@ class BookingStates(StatesGroup):
     waiting_time = State()
     waiting_confirm = State()
 
+
+class AdminPanelStates(StatesGroup):
+    waiting_access_code = State()
+    in_menu = State()
+
