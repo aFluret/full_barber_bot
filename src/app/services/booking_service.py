@@ -47,6 +47,7 @@ class BookingService:
             user_id=user_id,
             phone=phone,
             name=name,
+            role="client",
             created_at=None,  # создается на стороне БД/необязательно для MVP
         )
         await self._users_repo.upsert(user)

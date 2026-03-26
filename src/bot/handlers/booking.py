@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from aiogram import F, Router
@@ -21,6 +22,7 @@ from src.app.services.booking_service import (
     BookingService,
 )
 from src.infra.db.repositories.appointments_repository import SlotUnavailableError
+from src.infra.db.repositories.users_repository import UsersRepository
 from src.app.services.schedule_service import ScheduleService
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
@@ -33,6 +35,7 @@ from src.bot.keyboards.main_menu import main_menu_keyboard
 router = Router()
 booking_service = BookingService()
 schedule_service = ScheduleService()
+users_repo = UsersRepository()
 
 
 async def _safe_edit_booking_message(
@@ -214,6 +217,24 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.delete()
     except Exception:
         pass
+
+    # Уведомляем администраторов сразу после успешного подтверждения записи.
+    admins = await users_repo.list_admins()
+    if admins and user is not None:
+        notify_text = (
+            "Новая запись:\n"
+            f"{appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}\n"
+            f"Клиент: {user.name} ({user.phone})"
+        )
+        await asyncio.gather(
+            *[
+                callback.bot.send_message(chat_id=admin.user_id, text=notify_text)
+                for admin in admins
+                if admin.user_id != callback.from_user.id
+            ],
+            return_exceptions=True,
+        )
+
     await callback.message.answer(
         f"{user_name}, ты записан на {appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}",
         reply_markup=main_menu_keyboard(),

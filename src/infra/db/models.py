@@ -9,6 +9,7 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from typing import Optional
 
 
 @dataclass(slots=True)
@@ -16,7 +17,8 @@ class UserModel:
     user_id: int
     phone: str
     name: str
-    created_at: datetime
+    role: str
+    created_at: Optional[datetime]
 
 
 @dataclass(slots=True)

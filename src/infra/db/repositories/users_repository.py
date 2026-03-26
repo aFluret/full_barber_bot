@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import List, Optional
 
 from src.infra.db.models import UserModel
 from src.infra.db.supabase_client import get_supabase_client
@@ -23,7 +23,7 @@ class UsersRepository:
             client = get_supabase_client()
             res = (
                 client.table("users")
-                .select("user_id, phone, name, created_at")
+                .select("user_id, phone, name, role, created_at")
                 .eq("user_id", user_id)
                 .limit(1)
                 .execute()
@@ -44,6 +44,7 @@ class UsersRepository:
             user_id=int(row["user_id"]),
             phone=str(row["phone"]),
             name=str(row["name"]),
+            role=str(row.get("role") or "client"),
             created_at=created_at_dt,
         )
 
@@ -58,3 +59,33 @@ class UsersRepository:
             client.table("users").upsert(payload, on_conflict="user_id").execute()
 
         await asyncio.to_thread(_op)
+
+    async def list_admins(self) -> List[UserModel]:
+        def _op() -> List[dict]:
+            client = get_supabase_client()
+            res = (
+                client.table("users")
+                .select("user_id, phone, name, role, created_at")
+                .eq("role", "admin")
+                .execute()
+            )
+            return list(res.data or [])
+
+        rows = await asyncio.to_thread(_op)
+        out: List[UserModel] = []
+        for row in rows:
+            created_at = row.get("created_at")
+            if isinstance(created_at, str):
+                created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            else:
+                created_at_dt = created_at
+            out.append(
+                UserModel(
+                    user_id=int(row["user_id"]),
+                    phone=str(row.get("phone") or ""),
+                    name=str(row.get("name") or ""),
+                    role=str(row.get("role") or "client"),
+                    created_at=created_at_dt,
+                )
+            )
+        return out
