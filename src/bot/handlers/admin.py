@@ -35,14 +35,20 @@ def _admin_panel_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Расписание барбера",
-                    callback_data="admin_panel:schedule",
+                    text="Записи на сегодня",
+                    callback_data="admin_panel:today_appointments",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Приёмы на сегодня",
-                    callback_data="admin_panel:today_appointments",
+                    text="Записи на завтра",
+                    callback_data="admin_panel:tomorrow_appointments",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Управление записями",
+                    callback_data="admin_panel:manage_appointments",
                 )
             ],
         ]
@@ -258,42 +264,6 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "admin_panel:schedule")
-async def admin_panel_show_schedule(callback: CallbackQuery, state: FSMContext) -> None:
-    # Фоллбек-страховка: если callback пришел не в ожидаемом состоянии.
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
-        return
-
-    schedule = await work_schedule_repo.get_latest()
-    if schedule is None:
-        weekdays = sorted(schedule_service.WORKING_WEEKDAYS)
-        start_time = ScheduleService.DEFAULT_START
-        end_time = ScheduleService.DEFAULT_END
-    else:
-        weekdays = sorted(schedule.weekdays)
-        start_time = schedule.start_time.strftime("%H:%M")
-        end_time = schedule.end_time.strftime("%H:%M")
-
-    weekdays_human = ",".join(str(d + 1) for d in weekdays)
-
-    today = date.today()
-    slots_today = await schedule_service.get_candidate_slots_for_date(today)
-    today_is_working = today.weekday() in set(weekdays)
-
-    slots_text = ", ".join(slots_today) if slots_today else "-"
-
-    await _safe_edit_admin_panel(
-        callback,
-        "Расписание барбера:\n"
-        f"- дни: {weekdays_human} (1=Пн ... 7=Вс)\n"
-        f"- время: {start_time} - {end_time}\n"
-        f"- сегодня: {'рабочий' if today_is_working else 'нерабочий'}\n"
-        f"- слоты на сегодня: {slots_text}",
-    )
-    await callback.answer()
-
-
 @router.callback_query(F.data == "admin_panel:today_appointments")
 async def admin_panel_show_today_appointments(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != AdminPanelStates.in_menu.state:
@@ -302,7 +272,7 @@ async def admin_panel_show_today_appointments(callback: CallbackQuery, state: FS
 
     appts = await appointments_repo.list_by_date_from_today(date.today())
     if not appts:
-        text = "Приёмы на сегодня: записей нет."
+        text = "Записи на сегодня: записей нет."
         await _safe_edit_admin_panel(callback, text)
         await callback.answer()
         return
@@ -320,6 +290,47 @@ async def admin_panel_show_today_appointments(callback: CallbackQuery, state: FS
             )
         )
 
-    text = "Приёмы на сегодня:\n" + ("\n".join(lines) if lines else "Записей нет.")
+    text = "Записи на сегодня:\n" + ("\n".join(lines) if lines else "Записей нет.")
     await _safe_edit_admin_panel(callback, text)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel:tomorrow_appointments")
+async def admin_panel_show_tomorrow_appointments(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+
+    appts = await appointments_repo.list_by_date_from_today(date.today() + timedelta(days=1))
+    if not appts:
+        text = "Записи на завтра: записей нет."
+        await _safe_edit_admin_panel(callback, text)
+        await callback.answer()
+        return
+
+    lines: list[str] = []
+    for appt in appts:
+        user = await users_repo.get_by_user_id(appt.user_id)
+        if user is None:
+            continue
+        lines.append(
+            _format_line(
+                time_slot=appt.time_slot.strftime("%H:%M"),
+                name=user.name,
+                phone=user.phone,
+            )
+        )
+
+    text = "Записи на завтра:\n" + ("\n".join(lines) if lines else "Записей нет.")
+    await _safe_edit_admin_panel(callback, text)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel:manage_appointments")
+async def admin_panel_manage_appointments_stub(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+
+    await _safe_edit_admin_panel(callback, "Управление записями: раздел в разработке.")
     await callback.answer()

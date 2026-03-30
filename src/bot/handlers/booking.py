@@ -222,15 +222,15 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     admins = await users_repo.list_admins()
     if admins and user is not None:
         notify_text = (
-            "Новая запись:\n"
-            f"{appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}\n"
-            f"Клиент: {user.name} ({user.phone})"
+            "🔥 Новая запись\n\n"
+            f"Клиент: {user.name}\n"
+            f"Время: {appointment.time_slot.strftime('%H:%M')}\n"
+            f"Номер телефона: {user.phone}"
         )
         await asyncio.gather(
             *[
                 callback.bot.send_message(chat_id=admin.user_id, text=notify_text)
                 for admin in admins
-                if admin.user_id != callback.from_user.id
             ],
             return_exceptions=True,
         )
