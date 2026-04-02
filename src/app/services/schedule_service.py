@@ -22,6 +22,7 @@ class ScheduleService:
 
     LUNCH_START = time(14, 0)
     LUNCH_END = time(15, 0)
+    LUNCH_DURATION_MINUTES = 60
 
     def __init__(self) -> None:
         self._repo = WorkScheduleRepository()
@@ -38,6 +39,14 @@ class ScheduleService:
                 weekdays=set(self.WORKING_WEEKDAYS),
                 start_time=datetime.strptime(self.DEFAULT_START, "%H:%M").time(),
                 end_time=datetime.strptime(self.DEFAULT_END, "%H:%M").time(),
+                lunch_time=self.LUNCH_START,
+            )
+        if schedule.lunch_time is None:
+            return WorkScheduleModel(
+                weekdays=set(schedule.weekdays),
+                start_time=schedule.start_time,
+                end_time=schedule.end_time,
+                lunch_time=self.LUNCH_START,
             )
         return schedule
 
@@ -79,10 +88,15 @@ class ScheduleService:
             start_t = current.time()
             end_t = (current + timedelta(minutes=duration_minutes)).time()
 
-            # TZ_MARK: слот не должен пересекаться с обедом 14:00–15:00.
-            if self._intervals_overlap(start_t, end_t, self.LUNCH_START, self.LUNCH_END):
-                current += step
-                continue
+            # TZ_MARK: слот не должен пересекаться с обедом.
+            if schedule.lunch_time is not None:
+                lunch_start = schedule.lunch_time
+                lunch_end = (
+                    datetime.combine(target_date, lunch_start) + timedelta(minutes=self.LUNCH_DURATION_MINUTES)
+                ).time()
+                if self._intervals_overlap(start_t, end_t, lunch_start, lunch_end):
+                    current += step
+                    continue
 
             out.append(start_t.strftime("%H:%M"))
             current += step

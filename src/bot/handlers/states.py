@@ -31,5 +31,6 @@ class AdminScheduleStates(StatesGroup):
     waiting_weekdays = State()
     waiting_start_time = State()
     waiting_end_time = State()
+    waiting_lunch_time = State()
     waiting_confirm = State()
 

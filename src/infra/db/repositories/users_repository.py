@@ -60,6 +60,13 @@ class UsersRepository:
 
         await asyncio.to_thread(_op)
 
+    async def set_role(self, user_id: int, role: str) -> None:
+        def _op() -> None:
+            client = get_supabase_client()
+            client.table("users").update({"role": role}).eq("user_id", user_id).execute()
+
+        await asyncio.to_thread(_op)
+
     async def list_admins(self) -> List[UserModel]:
         def _op() -> List[dict]:
             client = get_supabase_client()

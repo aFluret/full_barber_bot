@@ -24,6 +24,7 @@ from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepository
 from src.app.services.schedule_service import ScheduleService
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
+from src.bot.keyboards.main_menu import admin_menu_keyboard, main_menu_keyboard
 
 router = Router()
 appointments_repo = AppointmentsRepository()
@@ -31,54 +32,13 @@ users_repo = UsersRepository()
 services_repo = ServicesRepository()
 work_schedule_repo = WorkScheduleRepository()
 schedule_service = ScheduleService()
-
-def _admin_panel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Записи на сегодня",
-                    callback_data="admin_panel:today_appointments",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Записи на завтра",
-                    callback_data="admin_panel:tomorrow_appointments",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Записи на другой день",
-                    callback_data="admin_panel:other_days",
-                )
-            ],
-        ]
-    )
-
-
-def _admin_other_days_keyboard(days: list[date]) -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = []
-    for i in range(0, len(days), 3):
-        row = days[i : i + 3]
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=d.strftime("%d.%m"),
-                    callback_data=f"admin_panel:other_day_pick:{d.isoformat()}",
-                )
-                for d in row
-            ]
-        )
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
+ADMIN_INLINE_MESSAGE_ID_KEY = "admin_inline_message_id"
 
 async def _safe_edit_admin_panel(
     callback: CallbackQuery,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
-    reply_markup = reply_markup or _admin_panel_keyboard()
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
@@ -88,132 +48,159 @@ async def _safe_edit_admin_panel(
         await callback.message.answer(text, reply_markup=reply_markup)
 
 
-def _is_admin(user_id: int) -> bool:
-    settings = get_settings()
-    raw = settings.admin_user_ids.strip()
-    if not raw:
-        return False
-    ids = []
-    for part in raw.split(","):
-        part = part.strip()
-        if part:
-            ids.append(int(part))
-    return user_id in ids
+async def _is_admin(user_id: int) -> bool:
+    user = await users_repo.get_by_user_id(user_id)
+    return bool(user and user.role == "admin")
 
 
-def _format_line(time_range: str, name: str, phone: str, service_text: str) -> str:
-    return f"{time_range} — {name} ({phone}) — {service_text}"
+async def _ensure_admin_mode(message: Message, state: FSMContext) -> bool:
+    current = await state.get_state()
+    if current == AdminPanelStates.in_menu.state:
+        return True
+    await message.answer("Ты не в админ-панели. Напиши /admin и введи код доступа.")
+    return False
 
 
-async def _send_for_date(message: Message, target_date: date) -> None:
+async def _delete_tracked_admin_inline_message(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    message_id = data.get(ADMIN_INLINE_MESSAGE_ID_KEY)
+    if isinstance(message_id, int):
+        try:
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=message_id)
+        except Exception:
+            pass
+    await state.update_data(**{ADMIN_INLINE_MESSAGE_ID_KEY: None})
+
+
+def _weekday_ru(d: date) -> str:
+    names = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
+    return names[d.weekday()]
+
+
+def _fmt_lunch(schedule) -> str:
+    if schedule is None:
+        return "14:00 — 15:00"
+    if schedule.lunch_time is None:
+        return "без обеда"
+    lunch_end = datetime.combine(date.today(), schedule.lunch_time) + timedelta(minutes=60)
+    return f"{schedule.lunch_time.strftime('%H:%M')} — {lunch_end.strftime('%H:%M')}"
+
+
+async def _render_day_report(target_date: date) -> str:
     appts = await appointments_repo.list_by_date_from_today(target_date)
     if not appts:
-        await message.answer("Записей нет.")
-        return
+        return "На сегодня записей нет 📭" if target_date == date.today() else "На этот день записей нет 📭"
 
     services = await services_repo.list_all()
     services_map = {s.id: s for s in services}
 
-    lines: list[str] = []
-    # N+1 — допустимо для MVP.
+    total_sum = 0
+    lines: list[str] = [f"📋 Записи на {_weekday_ru(target_date)}, {target_date.strftime('%d.%m')}:\n"]
+    idx = 1
     for appt in appts:
         user = await users_repo.get_by_user_id(appt.user_id)
         if user is None:
             continue
-
         service = services_map.get(appt.service_id)
-        service_text = (
-            f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appt.service_id}"
-        )
+        service_name = service.name if service is not None else f"Услуга #{appt.service_id}"
+        service_price = service.price_byn if service is not None else 0
+        total_sum += service_price
         lines.append(
-            _format_line(
-                time_range=f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
-                name=user.name,
-                phone=user.phone,
-                service_text=service_text,
-            )
+            f"{idx}. {appt.start_time.strftime('%H:%M')} — {user.name}\n"
+            f"   {service_name} — {service_price} BYN\n"
+            f"   📞 {user.phone}\n"
         )
+        idx += 1
 
-    await message.answer("\n".join(lines) if lines else "Записей нет.")
+    lines.append(f"━━━━━━━━━━━━━━━━━━\nВсего: {idx - 1} записи | Сумма: {total_sum} BYN")
+    return "\n".join(lines)
 
 
 @router.message(Command("today"))
-async def today_appointments(message: Message) -> None:
-    if not _is_admin(message.from_user.id):
+async def today_appointments(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
         return
-    await _send_for_date(message, date.today())
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await message.answer(await _render_day_report(date.today()))
 
 
 @router.message(Command("tomorrow"))
-async def tomorrow_appointments(message: Message) -> None:
-    if not _is_admin(message.from_user.id):
+async def tomorrow_appointments(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
         return
-    await _send_for_date(message, date.today() + timedelta(days=1))
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await message.answer(await _render_day_report(date.today() + timedelta(days=1)))
 
 
 @router.message(Command("all"))
-async def all_future_appointments(message: Message) -> None:
-    if not _is_admin(message.from_user.id):
+async def all_future_appointments(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
         return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
 
     appts = await appointments_repo.list_confirmed_from_date(date.today())
     if not appts:
-        await message.answer("Будущих записей нет.")
+        await message.answer("Будущих записей пока нет 📭")
         return
 
     services = await services_repo.list_all()
     services_map = {s.id: s for s in services}
 
-    lines: list[str] = []
+    lines: list[str] = ["📋 Все будущие записи:\n"]
+    total_sum = 0
+    current_day: date | None = None
     for appt in appts:
         user = await users_repo.get_by_user_id(appt.user_id)
         if user is None:
             continue
 
         service = services_map.get(appt.service_id)
-        service_text = (
-            f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appt.service_id}"
-        )
+        service_name = service.name if service is not None else f"Услуга #{appt.service_id}"
+        service_price = service.price_byn if service is not None else 0
+        total_sum += service_price
+        if current_day != appt.date:
+            current_day = appt.date
+            lines.append(f"\n{_weekday_ru(appt.date)}, {appt.date.strftime('%d.%m')}:")
         lines.append(
-            _format_line(
-                time_range=f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
-                name=user.name,
-                phone=user.phone,
-                service_text=service_text,
-            )
+            f"  {appt.start_time.strftime('%H:%M')} — {user.name} — {service_name} — {service_price} BYN"
         )
 
-    await message.answer("\n".join(lines) if lines else "Будущих записей нет.")
+    lines.append(f"\n━━━━━━━━━━━━━━━━━━\nВсего: {len(appts)} записи | Сумма: {total_sum} BYN")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("schedule"))
-async def show_work_schedule(message: Message) -> None:
-    if not _is_admin(message.from_user.id):
+async def show_work_schedule(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
         return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
 
     schedule = await work_schedule_repo.get_latest()
     if schedule is None:
-        # Фоллбек на дефолтный график MVP.
-        weekdays = sorted(schedule_service.WORKING_WEEKDAYS)
         start_time = ScheduleService.DEFAULT_START
         end_time = ScheduleService.DEFAULT_END
     else:
-        weekdays = sorted(schedule.weekdays)
         start_time = schedule.start_time.strftime("%H:%M")
         end_time = schedule.end_time.strftime("%H:%M")
 
-    # Пользовательский формат: 1=Пн ... 7=Вс
-    weekdays_human = ",".join(str(d + 1) for d in weekdays)
     await message.answer(
-        "Текущий график (1=Пн ... 7=Вс):\n"
-        f"- days: {weekdays_human}\n"
-        f"- start: {start_time}\n"
-        f"- end: {end_time}\n"
-        f"- slot duration: {ScheduleService.DEFAULT_STEP_MINUTES} минут"
+        "⚙️ Текущий график:\n\n"
+        "Рабочие дни: Пн — Сб\n"
+        f"Время работы: {start_time} — {end_time}\n"
+        f"Обед: {_fmt_lunch(schedule)}\n"
+        "Выходной: Вс"
     )
 
 
@@ -277,43 +264,65 @@ def _schedule_times_keyboard(times: list[str], kind: str) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _schedule_confirm_keyboard() -> InlineKeyboardMarkup:
+def _schedule_entry_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Сохранить", callback_data="admin_schedule:save_schedule")],
-            [InlineKeyboardButton(text="⟵ Назад к дням", callback_data="admin_schedule:back_to_weekdays")],
+            [InlineKeyboardButton(text="Рабочие дни", callback_data="admin_schedule:edit_days")],
+            [InlineKeyboardButton(text="Время начала", callback_data="admin_schedule:edit_start")],
+            [InlineKeyboardButton(text="Время окончания", callback_data="admin_schedule:edit_end")],
         ]
     )
 
 
+def _lunch_time_keyboard(times: list[str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            *[
+                [InlineKeyboardButton(text=t, callback_data=f"admin_schedule:lunch_time:{t}")]
+                for t in times
+            ],
+            [InlineKeyboardButton(text="Без обеда", callback_data="admin_schedule:lunch_none")],
+            [InlineKeyboardButton(text="Назад к выбору времени", callback_data="admin_schedule:back_to_weekdays")],
+        ]
+    )
+
+
+async def _open_schedule_editor(message: Message, state: FSMContext) -> None:
+    schedule = await work_schedule_repo.get_latest()
+    if schedule is None:
+        selected_weekdays = set(schedule_service.WORKING_WEEKDAYS)
+    else:
+        # Ограничиваем UI диапазоном Пн..Сб.
+        selected_weekdays = {d for d in schedule.weekdays if d in SCHEDULE_WEEKDAY_LABELS}
+
+    await state.clear()
+    await state.set_state(AdminScheduleStates.waiting_weekdays)
+    await state.update_data(schedule_weekdays=sorted(selected_weekdays))
+
+    await message.answer(
+        "Редактирование расписания. Выберите рабочие дни (Пн..Сб):",
+        reply_markup=_schedule_weekdays_keyboard(selected_weekdays),
+    )
+
+
+async def _send_or_replace_schedule_panel(message: Message, state: FSMContext, text: str) -> None:
+    await _delete_tracked_admin_inline_message(message, state)
+    sent = await message.answer(text, reply_markup=_schedule_entry_keyboard())
+    await state.update_data(**{ADMIN_INLINE_MESSAGE_ID_KEY: sent.message_id})
+
+
 @router.message(Command("set_schedule"))
 async def set_work_schedule(message: Message, state: FSMContext) -> None:
-    if not _is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
         return
 
     parts = (message.text or "").strip().split()
     # UI-вариант: без аргументов.
     if len(parts) == 1:
-        schedule = await work_schedule_repo.get_latest()
-        if schedule is None:
-            selected_weekdays = set(schedule_service.WORKING_WEEKDAYS)
-            start_t = datetime.strptime(ScheduleService.DEFAULT_START, "%H:%M").time()
-            end_t = datetime.strptime(ScheduleService.DEFAULT_END, "%H:%M").time()
-        else:
-            # Ограничиваем UI диапазоном Пн..Сб.
-            selected_weekdays = {d for d in schedule.weekdays if d in SCHEDULE_WEEKDAY_LABELS}
-            start_t = schedule.start_time
-            end_t = schedule.end_time
-
-        await state.clear()
-        await state.set_state(AdminScheduleStates.waiting_weekdays)
-        await state.update_data(schedule_weekdays=sorted(selected_weekdays))
-
-        await message.answer(
-            "Редактирование расписания. Выберите рабочие дни (Пн..Сб):",
-            reply_markup=_schedule_weekdays_keyboard(selected_weekdays),
-        )
+        await _send_or_replace_schedule_panel(message, state, "Что хочешь изменить?")
         return
 
     # Legacy-вариант: /set_schedule 1,2,3,4,5 10:00 18:00
@@ -375,8 +384,9 @@ async def set_work_schedule(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("admin"))
 async def admin_panel_entry(message: Message, state: FSMContext) -> None:
+    await _delete_tracked_admin_inline_message(message, state)
     await state.set_state(AdminPanelStates.waiting_access_code)
-    await message.answer("Введите код доступа")
+    await message.answer("Введи код доступа 🔐")
 
 
 @router.message(AdminPanelStates.waiting_access_code)
@@ -386,131 +396,166 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
     expected = (settings.admin_panel_access_code or "").strip()
 
     if not code or code != expected:
-        await message.answer("Неверный код доступа. Попробуйте еще раз.")
+        await message.answer("Неверный код ❌\nПопробуй ещё раз.")
         return
 
+    user = await users_repo.get_by_user_id(message.from_user.id)
+    if user is None:
+        await message.answer("Сначала пройдите регистрацию через /start, затем повторите /admin.")
+        await state.clear()
+        return
+
+    await users_repo.set_role(message.from_user.id, "admin")
     await state.set_state(AdminPanelStates.in_menu)
     await message.answer(
-        "Админ-панель открыта. Выберите пункт:",
-        reply_markup=_admin_panel_keyboard(),
+        f"Привет, {user.name}! 👋\n"
+        "Ты вошёл в админ-панель.\n\n"
+        "Вот что ты можешь делать:\n\n"
+        "📋 Записи:\n"
+        "/today — записи на сегодня\n"
+        "/tomorrow — записи на завтра\n"
+        "/all — все будущие записи\n\n"
+        "⚙️ Настройки:\n"
+        "/schedule — посмотреть текущий график работы\n"
+        "/set_schedule — изменить график работы\n"
+        "  (рабочие дни, время начала/конца, обед)\n\n"
+        "❌ Выход:\n"
+        "/exit — выйти из админки\n"
+        "  и вернуться в режим клиента",
+        reply_markup=admin_menu_keyboard(),
     )
 
 
-def _admin_day_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⟵ В меню",
-                    callback_data="admin_panel:back_to_menu",
-                )
-            ]
-        ]
+@router.message(Command("exit"))
+async def exit_admin_panel(message: Message, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await message.answer("Ты уже в обычном режиме.")
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await users_repo.set_role(message.from_user.id, "client")
+    await state.clear()
+    await message.answer(
+        "Ты вышел из админ-панели.\nТеперь бот работает в обычном режиме 👋",
+        reply_markup=main_menu_keyboard(),
     )
 
 
-async def _render_admin_day(target_date: date) -> tuple[str, InlineKeyboardMarkup]:
-    appts = await appointments_repo.list_by_date_from_today(target_date)
-    if not appts:
-        return ("На этот день записей нет", _admin_panel_keyboard())
-
-    services = await services_repo.list_all()
-    services_map = {s.id: s for s in services}
-
-    lines: list[str] = []
-    for appt in appts:
-        user = await users_repo.get_by_user_id(appt.user_id)
-        if user is None:
-            continue
-        service = services_map.get(appt.service_id)
-        service_text = (
-            f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appt.service_id}"
-        )
-        lines.append(
-            _format_line(
-                time_range=f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
-                name=user.name,
-                phone=user.phone,
-                service_text=service_text,
-            )
-        )
-
-    text = f"Записи на {target_date.strftime('%d.%m.%Y')}:\n" + ("\n".join(lines) if lines else "")
-    return (text, _admin_day_keyboard())
+@router.message(AdminPanelStates.in_menu)
+async def admin_panel_fallback(message: Message) -> None:
+    await message.answer(
+        "Ты в админ-панели.\n"
+        "Используй команды из списка.\n"
+        "Напиши /exit чтобы выйти."
+    )
 
 
-@router.callback_query(F.data == "admin_panel:back_to_menu")
-async def admin_panel_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_schedule:open_menu")
+async def admin_schedule_open_menu(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != AdminPanelStates.in_menu.state:
         await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
         return
-    await _safe_edit_admin_panel(callback, "Админ-панель: выберите пункт:", reply_markup=_admin_panel_keyboard())
+    await _safe_edit_admin_panel(callback, "Что хочешь изменить?", reply_markup=_schedule_entry_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin_panel:today_appointments")
-async def admin_panel_show_today_appointments(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_schedule:back_to_panel")
+async def admin_schedule_back_to_panel(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != AdminPanelStates.in_menu.state:
         await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
         return
-
-    text, kb = await _render_admin_day(date.today())
-    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await _safe_edit_admin_panel(callback, "Что хочешь изменить?", reply_markup=_schedule_entry_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin_panel:tomorrow_appointments")
-async def admin_panel_show_tomorrow_appointments(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_schedule:edit_days")
+async def admin_schedule_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != AdminPanelStates.in_menu.state:
         await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
         return
-
-    text, kb = await _render_admin_day(date.today() + timedelta(days=1))
-    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin_panel:other_days")
-async def admin_panel_show_other_days(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
-        return
-
-    horizon = 5
-    dates = await schedule_service.next_working_dates(horizon + 10)
-    start = date.today() + timedelta(days=1)
-    other_days = [d for d in dates if d >= start][:horizon]
-
-    if not other_days:
-        await _safe_edit_admin_panel(callback, "Ближайшие рабочие дни недоступны.", reply_markup=_admin_panel_keyboard())
-        await callback.answer()
-        return
-
+    schedule = await work_schedule_repo.get_latest()
+    selected_weekdays = (
+        {d for d in schedule.weekdays if d in SCHEDULE_WEEKDAY_LABELS}
+        if schedule is not None
+        else set(schedule_service.WORKING_WEEKDAYS)
+    )
+    await state.set_state(AdminScheduleStates.waiting_weekdays)
+    await state.update_data(schedule_weekdays=sorted(selected_weekdays))
     await _safe_edit_admin_panel(
         callback,
-        "Выберите ближайший день:",
-        reply_markup=_admin_other_days_keyboard(other_days),
+        "Выбери рабочие дни:",
+        reply_markup=_schedule_weekdays_keyboard(selected_weekdays),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("admin_panel:other_day_pick:"))
-async def admin_panel_pick_other_day(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_schedule:edit_start")
+async def admin_schedule_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != AdminPanelStates.in_menu.state:
         await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
         return
-
-    payload = callback.data.split(":", 3)[-1]
-    try:
-        target_date = date.fromisoformat(payload)
-    except ValueError:
-        await callback.answer("Некорректная дата.", show_alert=True)
-        return
-
-    text, kb = await _render_admin_day(target_date)
-    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    schedule = await work_schedule_repo.get_latest()
+    selected_weekdays = sorted(schedule.weekdays) if schedule else sorted(schedule_service.WORKING_WEEKDAYS)
+    await state.set_state(AdminScheduleStates.waiting_start_time)
+    await state.update_data(schedule_weekdays=selected_weekdays)
+    times = _schedule_time_options()
+    await _safe_edit_admin_panel(
+        callback,
+        "Выбери время начала работы:",
+        reply_markup=_schedule_times_keyboard(times, kind="start"),
+    )
     await callback.answer()
 
+
+@router.callback_query(F.data == "admin_schedule:edit_end")
+async def admin_schedule_edit_end(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    schedule = await work_schedule_repo.get_latest()
+    selected_weekdays = sorted(schedule.weekdays) if schedule else sorted(schedule_service.WORKING_WEEKDAYS)
+    start_time = schedule.start_time.strftime("%H:%M") if schedule else ScheduleService.DEFAULT_START
+    await state.set_state(AdminScheduleStates.waiting_end_time)
+    await state.update_data(schedule_weekdays=selected_weekdays, start_time=start_time)
+    times = [t for t in _schedule_time_options() if t > start_time]
+    await _safe_edit_admin_panel(
+        callback,
+        "Выбери время окончания работы:",
+        reply_markup=_schedule_times_keyboard(times, kind="end"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_schedule:lunch_none")
+async def admin_schedule_lunch_none(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminScheduleStates.waiting_lunch_time.state:
+        await callback.answer("Сначала выбери время окончания рабочего дня.", show_alert=True)
+        return
+    data = await state.get_data()
+    selected_weekdays = set(data.get("schedule_weekdays") or [])
+    start_s = data.get("start_time")
+    end_s = data.get("end_time")
+    if not selected_weekdays or not start_s or not end_s:
+        await callback.answer("Недостаточно данных для сохранения.", show_alert=True)
+        return
+    start_t = datetime.strptime(str(start_s), "%H:%M").time()
+    end_t = datetime.strptime(str(end_s), "%H:%M").time()
+    await work_schedule_repo.set_schedule(
+        weekdays=sorted(selected_weekdays),
+        start_time=start_t,
+        end_time=end_t,
+        lunch_time=None,
+    )
+    await state.set_state(AdminPanelStates.in_menu)
+    await _safe_edit_admin_panel(
+        callback,
+        "✅ График обновлён!\n\n"
+        "Рабочие дни: Пн — Сб\n"
+        f"Время работы: {start_t.strftime('%H:%M')} — {end_t.strftime('%H:%M')}\n"
+        "Обед: без обеда\n"
+        "Выходной: Вс",
+        reply_markup=_schedule_entry_keyboard(),
+    )
+    await callback.answer()
 
 def _schedule_time_options(start_hhmm: str = "08:00", end_hhmm: str = "20:00", step_minutes: int = 30) -> list[str]:
     start_dt = datetime.strptime(start_hhmm, "%H:%M")
@@ -580,9 +625,8 @@ async def admin_schedule_back_to_weekdays(callback: CallbackQuery, state: FSMCon
     if await state.get_state() not in {
         AdminScheduleStates.waiting_start_time.state,
         AdminScheduleStates.waiting_end_time.state,
-        AdminScheduleStates.waiting_confirm.state if hasattr(AdminScheduleStates, "waiting_confirm") else AdminScheduleStates.waiting_end_time.state,
+        AdminScheduleStates.waiting_lunch_time.state,
     }:
-        # waiting_confirm мы не используем отдельно, но оставляем защиту.
         pass
 
     data = await state.get_data()
@@ -637,23 +681,37 @@ async def admin_schedule_set_end_time(callback: CallbackQuery, state: FSMContext
         await callback.answer("Некорректное время конца.", show_alert=True)
         return
 
-    await state.update_data(end_time=payload)
-    await state.set_state(AdminScheduleStates.waiting_confirm)
+    data = await state.get_data()
+    start_s = data.get("start_time")
+    if not start_s:
+        await callback.answer("Сначала выберите время начала.", show_alert=True)
+        return
+    start_t = datetime.strptime(str(start_s), "%H:%M").time()
+    end_t = datetime.strptime(payload, "%H:%M").time()
+    options: list[str] = []
+    current = datetime.combine(date.today(), start_t)
+    end_limit = datetime.combine(date.today(), end_t) - timedelta(minutes=60)
+    while current <= end_limit:
+        options.append(current.strftime("%H:%M"))
+        current += timedelta(minutes=30)
 
+    await state.update_data(end_time=payload)
+    await state.set_state(AdminScheduleStates.waiting_lunch_time)
     await _safe_edit_admin_panel(
         callback,
-        "Проверьте настройки и сохраните:",
-        reply_markup=_schedule_confirm_keyboard(),
+        "Выбери время обеда:",
+        reply_markup=_lunch_time_keyboard(options),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin_schedule:save_schedule")
-async def admin_schedule_save(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminScheduleStates.waiting_confirm.state:
-        await callback.answer("Сначала завершите выбор времени.", show_alert=True)
+@router.callback_query(F.data.startswith("admin_schedule:lunch_time:"))
+async def admin_schedule_lunch_time(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminScheduleStates.waiting_lunch_time.state:
+        await callback.answer("Сначала выбери время окончания рабочего дня.", show_alert=True)
         return
 
+    payload = callback.data.split(":", 2)[-1]
     data = await state.get_data()
     selected_weekdays = set(data.get("schedule_weekdays") or [])
     start_s = data.get("start_time")
@@ -669,20 +727,23 @@ async def admin_schedule_save(callback: CallbackQuery, state: FSMContext) -> Non
         await callback.answer("start_time должен быть меньше end_time.", show_alert=True)
         return
 
+    lunch_t = datetime.strptime(payload, "%H:%M").time()
+    lunch_end_t = (datetime.combine(date.today(), lunch_t) + timedelta(minutes=60)).time()
     await work_schedule_repo.set_schedule(
         weekdays=sorted(selected_weekdays),
         start_time=start_t,
         end_time=end_t,
+        lunch_time=lunch_t,
     )
 
-    weekdays_human = ",".join(str(d + 1) for d in sorted(selected_weekdays))
-    await state.clear()
+    await state.set_state(AdminPanelStates.in_menu)
     await _safe_edit_admin_panel(
         callback,
-        "График сохранен.\n"
-        f"- days: {weekdays_human}\n"
-        f"- start: {start_t.strftime('%H:%M')}\n"
-        f"- end: {end_t.strftime('%H:%M')}",
-        reply_markup=_admin_panel_keyboard(),
+        "✅ График обновлён!\n\n"
+        "Рабочие дни: Пн — Сб\n"
+        f"Время работы: {start_t.strftime('%H:%M')} — {end_t.strftime('%H:%M')}\n"
+        f"Обед: {lunch_t.strftime('%H:%M')} — {lunch_end_t.strftime('%H:%M')}\n"
+        "Выходной: Вс",
+        reply_markup=_schedule_entry_keyboard(),
     )
     await callback.answer()

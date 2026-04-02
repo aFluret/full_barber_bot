@@ -32,7 +32,7 @@ from src.bot.keyboards.booking import (
     services_picker_keyboard,
     time_picker_keyboard,
 )
-from src.bot.keyboards.main_menu import main_menu_keyboard
+from src.bot.keyboards.main_menu import menu_keyboard_for_role
 
 router = Router()
 booking_service = BookingService()
@@ -292,7 +292,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.message.answer(
         f"{user_name}, ты записан на {appointment.date.strftime('%d.%m.%Y')} в {appointment.start_time.strftime('%H:%M')}",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=menu_keyboard_for_role(user.role if user else "client"),
     )
     await callback.answer()
 

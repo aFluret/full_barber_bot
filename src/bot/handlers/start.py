@@ -16,7 +16,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from src.app.services.booking_service import BookingService
 from src.bot.handlers.states import RegistrationStates
-from src.bot.keyboards.main_menu import main_menu_keyboard
+from src.bot.keyboards.main_menu import menu_keyboard_for_role
 
 router = Router()
 booking_service = BookingService()
@@ -29,7 +29,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
     if existing is not None:
         await message.answer(
             f"Привет, {existing.name} 👋\nБарбер Илья на связи.\nВыбери действие в меню ниже.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=menu_keyboard_for_role(existing.role),
         )
         await state.clear()
         return
@@ -79,5 +79,5 @@ async def handle_name(message: Message, state: FSMContext) -> None:
 
     await message.answer(
         f"Спасибо, {name}! Теперь ты можешь записаться.\nВыбери действие:",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=menu_keyboard_for_role("client"),
     )
