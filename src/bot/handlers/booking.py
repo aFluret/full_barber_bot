@@ -69,7 +69,10 @@ async def start_booking(message: Message, state: FSMContext) -> None:
 
     services = await services_repo.list_all()
     if not services:
-        await message.answer("Список услуг недоступен.")
+        await message.answer(
+            "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
+            "Напишите администратору и попробуйте позже."
+        )
         return
 
     prompt = await message.answer(

@@ -31,7 +31,8 @@ async def my_appointment(message: Message) -> None:
         return
 
     await message.answer(
-        f"{user_name}, твоя запись:\n{appt.date.strftime('%d.%m.%Y')} в {appt.time_slot.strftime('%H:%M')}",
+        f"{user_name}, твоя запись:\n"
+        f"{appt.date.strftime('%d.%m.%Y')} в {appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
         reply_markup=main_menu_keyboard(),
     )
 

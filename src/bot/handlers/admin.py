@@ -22,7 +22,6 @@ from src.infra.db.repositories.appointments_repository import AppointmentsReposi
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepository
-from src.app.services.booking_service import BookingService
 from src.app.services.schedule_service import ScheduleService
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
 
@@ -32,7 +31,6 @@ users_repo = UsersRepository()
 services_repo = ServicesRepository()
 work_schedule_repo = WorkScheduleRepository()
 schedule_service = ScheduleService()
-booking_service = BookingService()
 
 def _admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -398,30 +396,17 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
     )
 
 
-def _admin_cancel_keyboard(appts: list) -> InlineKeyboardMarkup:
-    """
-    Кнопки отмены каждой записи (по appointment_id) + возврат в меню.
-    """
-    buttons: list[list[InlineKeyboardButton]] = []
-    for appt in appts[:10]:
-        buttons.append(
+def _admin_day_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Отменить {appt.start_time.strftime('%H:%M')}",
-                    callback_data=f"admin_panel:cancel_appointment:{appt.id}",
+                    text="⟵ В меню",
+                    callback_data="admin_panel:back_to_menu",
                 )
             ]
-        )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="⟵ В меню",
-                callback_data="admin_panel:back_to_menu",
-            )
         ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def _render_admin_day(target_date: date) -> tuple[str, InlineKeyboardMarkup]:
@@ -451,7 +436,7 @@ async def _render_admin_day(target_date: date) -> tuple[str, InlineKeyboardMarku
         )
 
     text = f"Записи на {target_date.strftime('%d.%m.%Y')}:\n" + ("\n".join(lines) if lines else "")
-    return (text, _admin_cancel_keyboard(appts))
+    return (text, _admin_day_keyboard())
 
 
 @router.callback_query(F.data == "admin_panel:back_to_menu")
@@ -523,29 +508,6 @@ async def admin_panel_pick_other_day(callback: CallbackQuery, state: FSMContext)
         return
 
     text, kb = await _render_admin_day(target_date)
-    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("admin_panel:cancel_appointment:"))
-async def admin_panel_cancel_appointment(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await callback.answer("Сначала войдите в админ-панель через /admin", show_alert=True)
-        return
-
-    payload = callback.data.split(":", 3)[-1]
-    try:
-        appointment_id = int(payload)
-    except ValueError:
-        await callback.answer("Некорректный id записи.", show_alert=True)
-        return
-
-    cancelled = await booking_service.cancel_appointment_by_id(appointment_id)
-    if cancelled is None:
-        await callback.answer("Запись не найдена или уже отменена.", show_alert=True)
-        return
-
-    text, kb = await _render_admin_day(cancelled.date)
     await _safe_edit_admin_panel(callback, text, reply_markup=kb)
     await callback.answer()
 
@@ -640,7 +602,7 @@ async def admin_schedule_set_start_time(callback: CallbackQuery, state: FSMConte
         await callback.answer("Сначала выберите время начала.", show_alert=True)
         return
 
-    payload = callback.data.split(":", 3)[-1]
+    payload = callback.data.split(":", 2)[-1]
     # payload = HH:MM
     try:
         datetime.strptime(payload, "%H:%M")
@@ -668,7 +630,7 @@ async def admin_schedule_set_end_time(callback: CallbackQuery, state: FSMContext
         await callback.answer("Сначала выберите время конца.", show_alert=True)
         return
 
-    payload = callback.data.split(":", 3)[-1]
+    payload = callback.data.split(":", 2)[-1]
     try:
         datetime.strptime(payload, "%H:%M")
     except ValueError:
