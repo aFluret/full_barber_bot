@@ -481,10 +481,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
 
+    service = await services_repo.get_by_id(appointment.service_id)
+    service_name = service.name if service is not None else f"Услуга #{appointment.service_id}"
+    service_price = service.price_byn if service is not None else 0
+
     # Уведомляем администраторов сразу после успешного подтверждения записи.
     admins = await users_repo.list_admins()
     if admins and user is not None:
-        service = await services_repo.get_by_id(appointment.service_id)
         service_text = (
             f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appointment.service_id}"
         )
@@ -504,8 +507,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         )
 
     await callback.message.answer(
-        "Готово, ты записан! ✅\n"
-        f"Ты записан на {_human_booking_date(appointment.date)} в {appointment.start_time.strftime('%H:%M')}",
+        "Готово! Ты записан ✅\n\n"
+        f"Услуга: {service_name}\n"
+        f"Дата: {_human_booking_date(appointment.date)}\n"
+        f"Время: {appointment.start_time.strftime('%H:%M')}\n"
+        f"Стоимость: {service_price} BYN\n\n"
+        "Если планы изменятся — напиши заранее\n"
+        "До встречи! ✂️",
         reply_markup=menu_keyboard_for_role(user.role if user else "client"),
     )
     await callback.answer()

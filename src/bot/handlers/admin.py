@@ -171,7 +171,8 @@ async def all_future_appointments(message: Message, state: FSMContext) -> None:
             current_day = appt.date
             lines.append(f"\n{_weekday_ru(appt.date)}, {appt.date.strftime('%d.%m')}:")
         lines.append(
-            f"  {appt.start_time.strftime('%H:%M')} — {user.name} — {service_name} — {service_price} BYN"
+            f"  {appt.start_time.strftime('%H:%M')} — {user.name} — {service_name} — {service_price} BYN\n"
+            f"  📞 {user.phone}"
         )
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━━\nВсего: {len(appts)} записи | Сумма: {total_sum} BYN")
