@@ -27,6 +27,7 @@ from src.infra.db.repositories.services_repository import ServicesRepository
 from src.app.services.schedule_service import ScheduleService
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
+    categories_picker_keyboard,
     confirm_booking_keyboard,
     date_picker_keyboard,
     services_picker_keyboard,
@@ -39,6 +40,45 @@ booking_service = BookingService()
 schedule_service = ScheduleService()
 users_repo = UsersRepository()
 services_repo = ServicesRepository()
+
+SERVICE_CATEGORIES: dict[str, list[str]] = {
+    "cuts": [
+        "Мужская стрижка",
+        "Мужская удлинённая",
+        "Детская стрижка",
+        "Отец + Сын",
+    ],
+    "beard": [
+        "Оформление бороды и усов",
+        "Тонировка бороды и усов",
+    ],
+    "combo": [
+        "Комплекс",
+        "Удаление волос воском (3 зоны)",
+        "Укладка волос (без стрижки)",
+    ],
+}
+
+CATEGORY_LABELS: dict[str, str] = {
+    "cuts": "Стрижки",
+    "beard": "Борода и усы",
+    "combo": "Комплексные услуги",
+}
+
+OREDR_CATEGORY_KEYS: list[str] = ["cuts", "beard", "combo"]
+
+
+def _category_services(services: list, category_key: str) -> list:
+    names = set(SERVICE_CATEGORIES.get(category_key) or [])
+    return [s for s in services if getattr(s, "name", None) in names]
+
+
+def _build_categories_present(services: list) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for key in OREDR_CATEGORY_KEYS:
+        if _category_services(services, key):
+            out.append((key, CATEGORY_LABELS[key]))
+    return out
 
 
 async def _safe_edit_booking_message(
@@ -65,7 +105,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала пройдите регистрацию: нажмите /start.")
         return
 
-    await state.set_state(BookingStates.waiting_service)
+    await state.set_state(BookingStates.waiting_category)
 
     services = await services_repo.list_all()
     if not services:
@@ -75,15 +115,113 @@ async def start_booking(message: Message, state: FSMContext) -> None:
         )
         return
 
+    categories = _build_categories_present(services)
+    if not categories:
+        await message.answer("Список услуг недоступен.")
+        return
+
     prompt = await message.answer(
-        "Выбери услугу для записи:",
-        reply_markup=services_picker_keyboard(services),
+        "Выбери категорию ✂️",
+        reply_markup=categories_picker_keyboard(categories),
     )
     await state.update_data(booking_prompt_message_id=prompt.message_id)
 
 
+@router.callback_query(F.data.startswith("bk_cat:"))
+async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_category.state:
+        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        return
+
+    payload = callback.data.split(":", 1)[1].strip()
+    if payload not in SERVICE_CATEGORIES:
+        await callback.answer("Некорректная категория.", show_alert=True)
+        return
+
+    await state.update_data(booking_category_key=payload)
+    await state.set_state(BookingStates.waiting_service)
+
+    services = await services_repo.list_all()
+    cat_services = _category_services(services, payload)
+    if not cat_services:
+        await _safe_edit_booking_message(callback, "В этой категории услуги недоступны.")
+        await callback.answer()
+        return
+
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери услугу:",
+        reply_markup=services_picker_keyboard(cat_services, back_callback_data="bk_back:category"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bk_back:menu")
+async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text="Выберите действие в меню ниже.",
+        reply_markup=menu_keyboard_for_role("client"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bk_back:category")
+async def back_to_category(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() not in {BookingStates.waiting_service.state, BookingStates.waiting_date.state}:
+        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        return
+
+    await state.set_state(BookingStates.waiting_category)
+    services = await services_repo.list_all()
+    categories = _build_categories_present(services)
+
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери категорию ✂️",
+        reply_markup=categories_picker_keyboard(categories),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bk_back:date")
+async def back_to_date(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_time.state:
+        await callback.answer("Сначала выбери время.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    service_id = data.get("booking_service_id")
+    if not service_id:
+        await callback.answer("Сначала выбери услугу.", show_alert=True)
+        return
+
+    await state.set_state(BookingStates.waiting_date)
+    dates = await schedule_service.next_working_dates(7)
+    if not dates:
+        await _safe_edit_booking_message(callback, "На ближайшее время рабочие дни недоступны.")
+        await callback.answer()
+        return
+
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери дату для записи:",
+        reply_markup=date_picker_keyboard(dates, back_callback_data="bk_back:category"),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("bk_service:"))
 async def choose_service(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_service.state:
+        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        return
+
     payload = callback.data.split(":", 1)[1].strip()
     try:
         service_id = int(payload)
@@ -103,13 +241,17 @@ async def choose_service(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_edit_booking_message(
         callback,
         "Выбери дату для записи:",
-        reply_markup=date_picker_keyboard(dates),
+        reply_markup=date_picker_keyboard(dates, back_callback_data="bk_back:category"),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("bk_date:"))
 async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_date.state:
+        await callback.answer("Сначала выбери дату.", show_alert=True)
+        return
+
     payload = callback.data.split(":", 1)[1]
     try:
         target_date = date.fromisoformat(payload)
@@ -131,7 +273,7 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_edit_booking_message(
             callback,
             "На выбранную дату свободных мест нет. Выбери другую дату:",
-            reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
+            reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
         )
         await state.set_state(BookingStates.waiting_date)
         await callback.answer()
@@ -140,13 +282,17 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_edit_booking_message(
         callback,
         f"Дата: {target_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
-        reply_markup=time_picker_keyboard(slots),
+        reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("bk_time:"))
 async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_time.state:
+        await callback.answer("Сначала выбери время.", show_alert=True)
+        return
+
     time_slot = callback.data.split(":", 1)[1].strip()
     if not time_slot:
         await callback.answer("Некорректное время.", show_alert=True)
@@ -196,13 +342,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await _safe_edit_booking_message(
                 callback,
                 "Свободных мест больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
+                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
             )
         else:
             await _safe_edit_booking_message(
                 callback,
                 f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
-                reply_markup=time_picker_keyboard(slots),
+                reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
             )
         await callback.answer()
         return
@@ -240,13 +386,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await _safe_edit_booking_message(
                 callback,
                 "Место уже занято. Выбери другое время:",
-                reply_markup=time_picker_keyboard(slots),
+                reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
             )
         else:
             await _safe_edit_booking_message(
                 callback,
                 "Место уже занято, а свободных мест на эту дату больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
+                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
             )
             await state.set_state(BookingStates.waiting_date)
         await callback.answer()

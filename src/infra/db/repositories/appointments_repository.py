@@ -338,3 +338,52 @@ class AppointmentsRepository:
             created_at=created_at_dt,
         )
 
+    async def complete_ended_confirmed_appointments(self, now_local: datetime) -> List[int]:
+        """
+        Автозавершение: если confirmed-запись уже закончилась, ставим status='completed'.
+        Возвращает список appointment_id, для которых нужно отменить будущие reminder_jobs.
+        """
+
+        today = now_local.date()
+        now_time = now_local.time()
+        today_iso = today.isoformat()
+        now_time_supabase = self._time_to_supabase(now_time)
+
+        def _op() -> List[int]:
+            client = get_supabase_client()
+            ids: set[int] = set()
+
+            # Записи за прошлые дни (точно закончились).
+            rows_prev = (
+                client.table("appointments")
+                .select("id")
+                .eq("status", "confirmed")
+                .lt("date", today_iso)
+                .execute()
+            )
+            for r in rows_prev.data or []:
+                ids.add(int(r["id"]))
+
+            # Записи на сегодня, которые уже закончились.
+            rows_today = (
+                client.table("appointments")
+                .select("id")
+                .eq("status", "confirmed")
+                .eq("date", today_iso)
+                .lte("end_time", now_time_supabase)
+                .execute()
+            )
+            for r in rows_today.data or []:
+                ids.add(int(r["id"]))
+
+            if not ids:
+                return []
+
+            # Обновляем status по каждому id (простота/надежность для MVP).
+            for appointment_id in ids:
+                client.table("appointments").update({"status": "completed"}).eq("id", appointment_id).execute()
+
+            return sorted(ids)
+
+        return await asyncio.to_thread(_op)
+

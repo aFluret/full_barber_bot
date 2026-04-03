@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -86,6 +87,17 @@ class ReminderService:
 
     async def send_due_reminders(self, bot: Bot) -> None:
         now = datetime.now(timezone.utc)
+
+        # MVP: перед отправкой напоминаний автозавершаем все ended confirmed-записи,
+        # чтобы они перестали блокировать слоты и не спамили напоминаниями.
+        now_local = datetime.now(self._app_timezone)
+        ended_ids = await self._appointments_repo.complete_ended_confirmed_appointments(now_local)
+        if ended_ids:
+            await asyncio.gather(
+                *[self.cancel_future_reminders_for_appointment(aid) for aid in ended_ids],
+                return_exceptions=True,
+            )
+
         due = await self._jobs_repo.fetch_due_unsent(now)
         if not due:
             return

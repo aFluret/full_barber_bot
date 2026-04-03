@@ -47,7 +47,7 @@ def test_schedule_service_step_and_last_start_duration_60() -> None:
 
     slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=60))
 
-    # step=30 => старт 10:00...19:00, последний старт для 60 минут = 19:00
+    # step=duration => старт 10:00...19:00, последний старт для 60 минут = 19:00
     assert slots[0] == "10:00"
     assert "19:00" in slots
     assert "19:30" not in slots
@@ -62,7 +62,7 @@ def test_schedule_service_lunch_blocking() -> None:
 
     # Обед 14:00–15:00 блокирует интервалы, которые пересекаются с ним
     assert "14:00" not in slots
-    assert "13:30" not in slots
+    assert "13:00" in slots
     assert "15:00" in slots
 
 
@@ -81,3 +81,21 @@ def test_booking_service_overlap_filter_half_open_interval() -> None:
 
     # Граница end_time == start_time считается допустимой:
     assert "11:00" in slots
+
+
+def test_schedule_service_step_changes_with_duration_90() -> None:
+    service = ScheduleService()
+    service._repo = _DummyWorkScheduleRepo()
+
+    target_date = date(2026, 3, 30)
+    slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=90))
+
+    # step=90 => стартовые времена идут каждые 90 минут:
+    # 10:00, 11:30, 13:00, 14:30, 16:00, 17:30
+    # 13:00 и 14:30 пересекаются с обедом 14:00–15:00, поэтому их не должно быть.
+    assert "10:00" in slots
+    assert "11:30" in slots
+    assert "13:00" not in slots
+    assert "14:30" not in slots
+    assert "16:00" in slots
+    assert "17:30" in slots

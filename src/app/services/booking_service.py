@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from src.app.services.schedule_service import ScheduleService
 from src.app.services.reminder_service import ReminderService
@@ -22,6 +23,7 @@ from src.infra.db.repositories.appointments_repository import (
 )
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.users_repository import UsersRepository
+from src.infra.config.settings import get_settings
 
 
 class BookingAlreadyExistsError(Exception):
@@ -56,7 +58,21 @@ class BookingService:
         return user
 
     async def get_active_appointment(self, user_id: int) -> Optional[AppointmentModel]:
-        return await self._appointments_repo.get_active_for_user(user_id)
+        appt = await self._appointments_repo.get_active_for_user(user_id)
+        if appt is None:
+            return None
+
+        settings = get_settings()
+        tz = ZoneInfo(settings.app_timezone or "Europe/Minsk")
+        now_local = datetime.now(tz)
+
+        # Даже если в БД status ещё 'confirmed', считаем запись неактивной,
+        # когда она уже закончилась по времени.
+        end_dt_local = datetime.combine(appt.date, appt.end_time, tzinfo=tz)
+        if appt.date < now_local.date() or end_dt_local <= now_local:
+            return None
+
+        return appt
 
     @staticmethod
     def _intervals_overlap(a_start: time, a_end: time, b_start: time, b_end: time) -> bool:
@@ -78,6 +94,15 @@ class BookingService:
         for slot_hhmm in candidates:
             start_t = datetime.strptime(slot_hhmm, "%H:%M").time()
             end_t = (datetime.combine(target_date, start_t) + timedelta(minutes=service.duration_minutes)).time()
+
+            # Если выбираем "сегодня", скрываем уже начавшиеся слоты.
+            if target_date == date.today():
+                settings = get_settings()
+                tz = ZoneInfo(settings.app_timezone or "Europe/Minsk")
+                now_local = datetime.now(tz)
+                slot_dt_local = datetime.combine(target_date, start_t, tzinfo=tz)
+                if slot_dt_local < now_local:
+                    continue
 
             if any(self._intervals_overlap(start_t, end_t, o_start, o_end) for o_start, o_end in occupied):
                 continue
@@ -105,6 +130,15 @@ class BookingService:
 
             start_t = datetime.strptime(time_slot_hhmm, "%H:%M").time()
             end_t = (datetime.combine(target_date, start_t) + timedelta(minutes=service.duration_minutes)).time()
+
+            # Защита: не создаем запись в прошлом (особенно если кнопка устарела).
+            if target_date == date.today():
+                settings = get_settings()
+                tz = ZoneInfo(settings.app_timezone or "Europe/Minsk")
+                now_local = datetime.now(tz)
+                start_dt_local = datetime.combine(target_date, start_t, tzinfo=tz)
+                if start_dt_local < now_local:
+                    raise SlotUnavailableError("Слот уже прошел. Выберите другое время.")
 
             appointment = await self._appointments_repo.create_confirmed(
                 user_id=user_id,

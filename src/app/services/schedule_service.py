@@ -75,7 +75,9 @@ class ScheduleService:
 
         work_start_dt = datetime.combine(target_date, schedule.start_time)
         work_end_dt = datetime.combine(target_date, schedule.end_time)
-        step = timedelta(minutes=self.DEFAULT_STEP_MINUTES)
+        # По ТЗ: шаг стартового времени зависит от длительности услуги.
+        # Например, для 60 минут шаг = 60, для 90 минут шаг = 90 и т.д.
+        step = timedelta(minutes=duration_minutes)
 
         # Последний старт, при котором запись успевает закончиться до конца рабочего дня.
         last_start_dt = work_end_dt - timedelta(minutes=duration_minutes)
