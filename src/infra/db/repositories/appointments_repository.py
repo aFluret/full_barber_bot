@@ -10,8 +10,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from datetime import date, datetime, time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.infra.db.models import AppointmentModel
 from src.infra.db.supabase_client import get_supabase_client
@@ -137,6 +138,41 @@ class AppointmentsRepository:
                     )
                 )
             return out
+
+        return await asyncio.to_thread(_op)
+
+    async def list_confirmed_intervals_range(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> Dict[date, List[Tuple[time, time]]]:
+        """
+        Все подтверждённые интервалы за диапазон дат [start_date, end_date] одним запросом.
+        """
+
+        def _op() -> Dict[date, List[Tuple[time, time]]]:
+            client = get_supabase_client()
+            res = (
+                client.table("appointments")
+                .select("date,start_time,end_time")
+                .eq("status", "confirmed")
+                .gte("date", start_date.isoformat())
+                .lte("date", end_date.isoformat())
+                .execute()
+            )
+            out: Dict[date, List[Tuple[time, time]]] = defaultdict(list)
+            for row in res.data or []:
+                raw_d = row.get("date")
+                if raw_d is None:
+                    continue
+                d = date.fromisoformat(str(raw_d))
+                out[d].append(
+                    (
+                        self._parse_supabase_time(row["start_time"]),
+                        self._parse_supabase_time(row["end_time"]),
+                    )
+                )
+            return dict(out)
 
         return await asyncio.to_thread(_op)
 

@@ -110,6 +110,23 @@ def test_schedule_service_step_changes_with_duration_90() -> None:
     assert "17:30" in slots
 
 
+def test_schedule_service_sunday_allowed_when_in_schedule_weekdays() -> None:
+    class _RepoWithSunday:
+        async def get_latest(self):
+            return WorkScheduleModel(
+                weekdays={0, 1, 2, 3, 4, 5, 6},
+                start_time=time(10, 0),
+                end_time=time(20, 0),
+            )
+
+    service = ScheduleService()
+    service._repo = _RepoWithSunday()
+    # 2026-04-05 — воскресенье
+    target_date = date(2026, 4, 5)
+    slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=60))
+    assert "10:00" in slots
+
+
 def test_schedule_service_uses_lunch_time_from_schedule() -> None:
     service = ScheduleService()
     service._repo = _DummyCustomLunchScheduleRepo()

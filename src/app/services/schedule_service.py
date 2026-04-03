@@ -18,7 +18,7 @@ class ScheduleService:
     DEFAULT_END = "20:00"
     # Шаг стартового времени — 30 минут (как в TZ_MARK).
     DEFAULT_STEP_MINUTES = 30
-    WORKING_WEEKDAYS = {0, 1, 2, 3, 4, 5}  # Пн..Сб (0=Пн)
+    WORKING_WEEKDAYS = {0, 1, 2, 3, 4, 5}  # Дефолт: Пн–Сб; воскресенье задаётся в графике при необходимости
 
     LUNCH_START = time(14, 0)
     LUNCH_END = time(15, 0)
@@ -50,36 +50,22 @@ class ScheduleService:
             )
         return schedule
 
-    async def next_working_dates(self, count: int) -> list[date]:
-        today = date.today()
-        schedule = await self._get_schedule_or_default()
-        out: list[date] = []
-        d = today
-        while len(out) < count:
-            # TZ_MARK: в календаре выбора даты воскресенье не показываем.
-            if d.weekday() == 6:
-                d += timedelta(days=1)
-                continue
+    async def get_effective_schedule(self) -> WorkScheduleModel:
+        return await self._get_schedule_or_default()
 
-            if d.weekday() in schedule.weekdays:
-                out.append(d)
-            d += timedelta(days=1)
-        return out
-
-    async def get_candidate_slots_for_date(self, target_date: date, duration_minutes: int) -> list[str]:
-        schedule = await self._get_schedule_or_default()
-        if target_date.weekday() == 6:
-            return []
+    def candidate_slots_for_date_sync(
+        self,
+        target_date: date,
+        duration_minutes: int,
+        schedule: WorkScheduleModel,
+    ) -> list[str]:
         if target_date.weekday() not in schedule.weekdays:
             return []
 
         work_start_dt = datetime.combine(target_date, schedule.start_time)
         work_end_dt = datetime.combine(target_date, schedule.end_time)
-        # По ТЗ: шаг стартового времени зависит от длительности услуги.
-        # Например, для 60 минут шаг = 60, для 90 минут шаг = 90 и т.д.
         step = timedelta(minutes=duration_minutes)
 
-        # Последний старт, при котором запись успевает закончиться до конца рабочего дня.
         last_start_dt = work_end_dt - timedelta(minutes=duration_minutes)
         if last_start_dt < work_start_dt:
             return []
@@ -90,7 +76,6 @@ class ScheduleService:
             start_t = current.time()
             end_t = (current + timedelta(minutes=duration_minutes)).time()
 
-            # TZ_MARK: слот не должен пересекаться с обедом.
             if schedule.lunch_time is not None:
                 lunch_start = schedule.lunch_time
                 lunch_end = (
@@ -104,3 +89,18 @@ class ScheduleService:
             current += step
 
         return out
+
+    async def next_working_dates(self, count: int) -> list[date]:
+        today = date.today()
+        schedule = await self._get_schedule_or_default()
+        out: list[date] = []
+        d = today
+        while len(out) < count:
+            if d.weekday() in schedule.weekdays:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+    async def get_candidate_slots_for_date(self, target_date: date, duration_minutes: int) -> list[str]:
+        schedule = await self._get_schedule_or_default()
+        return self.candidate_slots_for_date_sync(target_date, duration_minutes, schedule)

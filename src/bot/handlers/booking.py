@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -24,20 +26,20 @@ from src.app.services.booking_service import (
 from src.infra.db.repositories.appointments_repository import SlotUnavailableError
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
-from src.app.services.schedule_service import ScheduleService
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
     categories_picker_keyboard,
     confirm_booking_keyboard,
-    date_picker_keyboard,
     services_picker_keyboard,
     time_picker_keyboard,
 )
+from src.bot.callback_safe import safe_callback_answer
+from src.bot.keyboards.calendar import build_calendar_keyboard
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
+from src.infra.config.settings import get_settings
 
 router = Router()
 booking_service = BookingService()
-schedule_service = ScheduleService()
 users_repo = UsersRepository()
 services_repo = ServicesRepository()
 
@@ -90,6 +92,21 @@ RU_MONTHS_GEN = {
     12: "декабря",
 }
 
+CALENDAR_MONTH_CACHE_TTL_SECONDS = 20.0
+_calendar_month_cache: dict[tuple[int, int, int], tuple[float, list[date]]] = {}
+
+
+def _cleanup_calendar_cache(now_mono: float) -> None:
+    if len(_calendar_month_cache) < 128:
+        return
+    expired = [
+        key
+        for key, (cached_at, _) in _calendar_month_cache.items()
+        if now_mono - cached_at > CALENDAR_MONTH_CACHE_TTL_SECONDS
+    ]
+    for key in expired:
+        _calendar_month_cache.pop(key, None)
+
 
 def _category_services(services: list, category_key: str) -> list:
     names = set(SERVICE_CATEGORIES.get(category_key) or [])
@@ -113,6 +130,86 @@ def _human_booking_date(d: date) -> str:
     else:
         suffix = RU_WEEKDAY_FULL[d.weekday()]
     return f"{d.day} {RU_MONTHS_GEN[d.month]} ({suffix})"
+
+
+def _local_today() -> date:
+    settings = get_settings()
+    tz = ZoneInfo(settings.app_timezone or "Europe/Minsk")
+    return datetime.now(tz).date()
+
+
+def _month_delta(year: int, month: int, delta: int) -> tuple[int, int]:
+    base = year * 12 + (month - 1) + delta
+    return base // 12, (base % 12) + 1
+
+
+async def _build_booked_days_for_month(
+    *,
+    year: int,
+    month: int,
+    service_id: int,
+) -> list[date]:
+    cache_key = (int(service_id), int(year), int(month))
+    now_mono = time.monotonic()
+    _cleanup_calendar_cache(now_mono)
+    cached = _calendar_month_cache.get(cache_key)
+    if cached is not None:
+        cached_at, cached_days = cached
+        if now_mono - cached_at <= CALENDAR_MONTH_CACHE_TTL_SECONDS:
+            return list(cached_days)
+
+    out = await booking_service.dates_without_available_slots_in_month(
+        year=year, month=month, service_id=service_id
+    )
+    _calendar_month_cache[cache_key] = (now_mono, list(out))
+    return out
+
+
+async def _render_calendar(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    year: int,
+    month: int,
+    title: str = "Выбери дату для записи:",
+) -> None:
+    data = await state.get_data()
+    service_id = data.get("booking_service_id")
+    if not service_id:
+        await _safe_edit_booking_message(callback, "Сначала выбери услугу.")
+        return
+    booked_days = await _build_booked_days_for_month(year=year, month=month, service_id=int(service_id))
+    await state.update_data(calendar_year=year, calendar_month=month)
+    await _safe_edit_booking_message(
+        callback,
+        title,
+        reply_markup=build_calendar_keyboard(year, month, booked_days),
+    )
+
+
+async def process_calendar_callback(callback: CallbackQuery, data: str):
+    if data in {"bk_cal_noop", "bk_cal_dis", "bk_cal_unavailable"}:
+        await safe_callback_answer(callback)
+        return {"kind": "unavailable"}
+    if data.startswith("bk_cal_nav:"):
+        payload = data.split(":", 1)[1]
+        try:
+            y_str, m_str = payload.split("-", 1)
+            y = int(y_str)
+            m = int(m_str)
+        except Exception:
+            await safe_callback_answer(callback, "Некорректная навигация", show_alert=True)
+            return {"kind": "invalid"}
+        return {"kind": "nav", "year": y, "month": m}
+    if data.startswith("bk_cal:"):
+        payload = data.split(":", 1)[1]
+        try:
+            target = date.fromisoformat(payload)
+        except ValueError:
+            await safe_callback_answer(callback, "Некорректная дата", show_alert=True)
+            return {"kind": "invalid"}
+        return {"kind": "date", "date": target}
+    return {"kind": "ignore"}
 
 
 async def _safe_edit_booking_message(
@@ -164,12 +261,12 @@ async def start_booking(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("bk_cat:"))
 async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != BookingStates.waiting_category.state:
-        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выберите категорию.", show_alert=True)
         return
 
     payload = callback.data.split(":", 1)[1].strip()
     if payload not in SERVICE_CATEGORIES:
-        await callback.answer("Некорректная категория.", show_alert=True)
+        await safe_callback_answer(callback, "Некорректная категория.", show_alert=True)
         return
 
     await state.update_data(booking_category_key=payload)
@@ -179,7 +276,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
     cat_services = _category_services(services, payload)
     if not cat_services:
         await _safe_edit_booking_message(callback, "В этой категории услуги недоступны.")
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     await _safe_edit_booking_message(
@@ -187,7 +284,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
         "Выбери услугу ✂️",
         reply_markup=services_picker_keyboard(cat_services, back_callback_data="bk_back:category"),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "bk_back:menu")
@@ -202,7 +299,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         text="Выберите действие в меню ниже.",
         reply_markup=menu_keyboard_for_role("client"),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "bk_restart_service")
@@ -212,7 +309,7 @@ async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext
     existing = await booking_service.get_user(user_id)
     if existing is None:
         await callback.message.answer("Сначала пройдите регистрацию: нажмите /start.")
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     services = await services_repo.list_all()
@@ -221,13 +318,13 @@ async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext
             "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
             "Напишите администратору и попробуйте позже."
         )
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     categories = _build_categories_present(services)
     if not categories:
         await callback.message.answer("Список услуг недоступен.")
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     await state.set_state(BookingStates.waiting_category)
@@ -235,13 +332,13 @@ async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext
         "Выбери категорию ✂️",
         reply_markup=categories_picker_keyboard(categories),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "bk_back:category")
 async def back_to_category(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() not in {BookingStates.waiting_service.state, BookingStates.waiting_date.state}:
-        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выберите категорию.", show_alert=True)
         return
 
     await state.set_state(BookingStates.waiting_category)
@@ -253,77 +350,82 @@ async def back_to_category(callback: CallbackQuery, state: FSMContext) -> None:
         "Выбери категорию ✂️",
         reply_markup=categories_picker_keyboard(categories),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "bk_back:date")
 async def back_to_date(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != BookingStates.waiting_time.state:
-        await callback.answer("Сначала выбери время.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери время.", show_alert=True)
         return
 
     data = await state.get_data()
     service_id = data.get("booking_service_id")
     if not service_id:
-        await callback.answer("Сначала выбери услугу.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
         return
 
     await state.set_state(BookingStates.waiting_date)
-    dates = await schedule_service.next_working_dates(7)
-    if not dates:
-        await _safe_edit_booking_message(callback, "На ближайшее время рабочие дни недоступны.")
-        await callback.answer()
-        return
-
-    await _safe_edit_booking_message(
-        callback,
-        "Выбери дату для записи:",
-        reply_markup=date_picker_keyboard(dates, back_callback_data="bk_back:category"),
-    )
-    await callback.answer()
+    await safe_callback_answer(callback)
+    data = await state.get_data()
+    booking_date_iso = data.get("booking_date")
+    if isinstance(booking_date_iso, str):
+        selected = date.fromisoformat(booking_date_iso)
+        cal_year, cal_month = selected.year, selected.month
+    else:
+        today = _local_today()
+        cal_year, cal_month = today.year, today.month
+    await _render_calendar(callback, state, year=cal_year, month=cal_month)
 
 
 @router.callback_query(F.data.startswith("bk_service:"))
 async def choose_service(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != BookingStates.waiting_service.state:
-        await callback.answer("Сначала выберите категорию.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выберите категорию.", show_alert=True)
         return
 
     payload = callback.data.split(":", 1)[1].strip()
     try:
         service_id = int(payload)
     except ValueError:
-        await callback.answer("Некорректная услуга.", show_alert=True)
+        await safe_callback_answer(callback, "Некорректная услуга.", show_alert=True)
         return
 
     await state.update_data(booking_service_id=service_id)
     await state.set_state(BookingStates.waiting_date)
-
-    dates = await schedule_service.next_working_dates(7)
-    if not dates:
-        await _safe_edit_booking_message(callback, "На ближайшее время рабочие дни недоступны.")
-        await callback.answer()
-        return
-
-    await _safe_edit_booking_message(
-        callback,
-        "Выбери дату для записи:",
-        reply_markup=date_picker_keyboard(dates, back_callback_data="bk_back:category"),
-    )
-    await callback.answer()
+    await safe_callback_answer(callback)
+    today = _local_today()
+    await _render_calendar(callback, state, year=today.year, month=today.month)
 
 
-@router.callback_query(F.data.startswith("bk_date:"))
+@router.callback_query(F.data.startswith("bk_cal"))
 async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != BookingStates.waiting_date.state:
-        await callback.answer("Сначала выбери дату.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
 
-    payload = callback.data.split(":", 1)[1]
-    try:
-        target_date = date.fromisoformat(payload)
-    except ValueError:
-        await callback.answer("Некорректная дата.", show_alert=True)
+    parsed = await process_calendar_callback(callback, callback.data)
+    kind = parsed.get("kind")
+    if kind in ("unavailable", "invalid"):
+        return
+    # Снимаем "часики" сразу, дальше может идти тяжелый рендер календаря.
+    await safe_callback_answer(callback)
+    if kind == "nav":
+        nav_year = int(parsed["year"])
+        nav_month = int(parsed["month"])
+        today = _local_today()
+        max_year, max_month = _month_delta(today.year, today.month, 3)
+        if (nav_year, nav_month) < (today.year, today.month) or (nav_year, nav_month) > (max_year, max_month):
+            return
+        await _render_calendar(callback, state, year=nav_year, month=nav_month)
+        return
+    if kind != "date":
+        return
+    target_date = parsed["date"]
+
+    now_date = _local_today()
+    max_year, max_month = _month_delta(now_date.year, now_date.month, 3)
+    if target_date < now_date or (target_date.year, target_date.month) > (max_year, max_month):
         return
 
     await state.update_data(booking_date=target_date.isoformat())
@@ -332,18 +434,19 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     service_id = data.get("booking_service_id")
     if not service_id:
-        await callback.answer("Сначала выбери услугу.", show_alert=True)
+        await _safe_edit_booking_message(callback, "Сначала выбери услугу.")
         return
 
     slots = await booking_service.list_available_time_slots(target_date, service_id=int(service_id))
     if not slots:
-        await _safe_edit_booking_message(
-            callback,
-            "На выбранную дату свободных мест нет. Выбери другую дату:",
-            reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
-        )
         await state.set_state(BookingStates.waiting_date)
-        await callback.answer()
+        await _render_calendar(
+            callback,
+            state,
+            year=target_date.year,
+            month=target_date.month,
+            title="На выбранную дату свободных мест нет. Выбери другую дату:",
+        )
         return
 
     await _safe_edit_booking_message(
@@ -351,24 +454,23 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
         f"Дата: {target_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
         reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("bk_time:"))
 async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != BookingStates.waiting_time.state:
-        await callback.answer("Сначала выбери время.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери время.", show_alert=True)
         return
 
     time_slot = callback.data.split(":", 1)[1].strip()
     if not time_slot:
-        await callback.answer("Некорректное время.", show_alert=True)
+        await safe_callback_answer(callback, "Некорректное время.", show_alert=True)
         return
 
     data = await state.get_data()
     booking_date_iso = data.get("booking_date")
     if not booking_date_iso:
-        await callback.answer("Сначала выбери дату.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
 
     await state.update_data(booking_time=time_slot)
@@ -380,7 +482,7 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
         f"Подтверди запись:\n{_human_booking_date(booking_date)} в {time_slot}",
         reply_markup=confirm_booking_keyboard(),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data.startswith("bk_confirm:"))
@@ -392,7 +494,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_time = data.get("booking_time")
     service_id = data.get("booking_service_id")
     if not booking_date_iso:
-        await callback.answer("Сначала выбери дату.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
 
     booking_date = date.fromisoformat(str(booking_date_iso))
@@ -401,15 +503,17 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         # Назад к выбору времени.
         await state.set_state(BookingStates.waiting_time)
         if not service_id:
-            await callback.answer("Сначала выбери услугу.", show_alert=True)
+            await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
             return
         slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
         if not slots:
             await state.set_state(BookingStates.waiting_date)
-            await _safe_edit_booking_message(
+            await _render_calendar(
                 callback,
-                "Свободных мест больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
+                state,
+                year=booking_date.year,
+                month=booking_date.month,
+                title="Свободных мест больше нет. Выбери другую дату:",
             )
         else:
             await _safe_edit_booking_message(
@@ -417,19 +521,19 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
                 f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
                 reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
             )
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     if action != "1":
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     if not booking_time:
-        await callback.answer("Сначала выбери время.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери время.", show_alert=True)
         return
 
     if not service_id:
-        await callback.answer("Сначала выбери услугу.", show_alert=True)
+        await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
         return
 
     try:
@@ -441,12 +545,12 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         )
     except BookingAlreadyExistsError as e:
         await _safe_edit_booking_message(callback, str(e))
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
     except SlotUnavailableError:
         # Слот мог стать занятым между отображением и подтверждением.
         if not service_id:
-            await callback.answer("Сначала выбери услугу.", show_alert=True)
+            await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
             return
         slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
         if slots:
@@ -456,13 +560,15 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
                 reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
             )
         else:
-            await _safe_edit_booking_message(
-                callback,
-                "Место уже занято, а свободных мест на эту дату больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7), back_callback_data="bk_back:category"),
-            )
             await state.set_state(BookingStates.waiting_date)
-        await callback.answer()
+            await _render_calendar(
+                callback,
+                state,
+                year=booking_date.year,
+                month=booking_date.month,
+                title="Место уже занято, а свободных мест на эту дату больше нет. Выбери другую дату:",
+            )
+        await safe_callback_answer(callback)
         return
     except Exception:
         # Чтобы пользователь не видел "тишину" при внутренних сбоях.
@@ -470,7 +576,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             callback,
             "Произошла ошибка при создании записи. Попробуй ещё раз.",
         )
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
 
     await state.clear()
@@ -516,5 +622,5 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         "До встречи! ✂️",
         reply_markup=menu_keyboard_for_role(user.role if user else "client"),
     )
-    await callback.answer()
+    await safe_callback_answer(callback)
 

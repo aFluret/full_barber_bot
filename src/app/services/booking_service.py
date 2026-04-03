@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Optional
@@ -107,6 +108,83 @@ class BookingService:
             if any(self._intervals_overlap(start_t, end_t, o_start, o_end) for o_start, o_end in occupied):
                 continue
             out.append(slot_hhmm)
+
+        return out
+
+    async def dates_without_available_slots_in_month(
+        self,
+        year: int,
+        month: int,
+        service_id: int,
+    ) -> list[date]:
+        """
+        Дни месяца, в которые для выбранной услуги нет ни одного свободного слота
+        (для подсветки календаря). Один запрос занятых интервалов на весь месяц.
+        """
+        settings = get_settings()
+        tz = ZoneInfo(settings.app_timezone or "Europe/Minsk")
+        now_local = datetime.now(tz)
+        today = now_local.date()
+
+        service = await self._services_repo.get_by_id(service_id)
+        schedule = await self._schedule_service.get_effective_schedule()
+
+        first_day = date(year, month, 1)
+        last_day = date(year, month, calendar.monthrange(year, month)[1])
+        intervals_by_date = await self._appointments_repo.list_confirmed_intervals_range(first_day, last_day)
+
+        out: list[date] = []
+        cur = first_day
+        while cur <= last_day:
+            if cur < today:
+                out.append(cur)
+                cur += timedelta(days=1)
+                continue
+            if cur.weekday() not in schedule.weekdays:
+                out.append(cur)
+                cur += timedelta(days=1)
+                continue
+            if cur == today and now_local.time() >= schedule.end_time:
+                out.append(cur)
+                cur += timedelta(days=1)
+                continue
+
+            if service is None:
+                candidates: list[str] = []
+            else:
+                candidates = self._schedule_service.candidate_slots_for_date_sync(
+                    cur, service.duration_minutes, schedule
+                )
+
+            if cur == today:
+                filtered: list[str] = []
+                for slot_hhmm in candidates:
+                    start_t = datetime.strptime(slot_hhmm, "%H:%M").time()
+                    slot_dt_local = datetime.combine(cur, start_t, tzinfo=tz)
+                    if slot_dt_local < now_local:
+                        continue
+                    filtered.append(slot_hhmm)
+                candidates = filtered
+
+            occupied = intervals_by_date.get(cur, [])
+            has_slot = False
+            if service is not None:
+                for slot_hhmm in candidates:
+                    start_t = datetime.strptime(slot_hhmm, "%H:%M").time()
+                    end_t = (
+                        datetime.combine(cur, start_t) + timedelta(minutes=service.duration_minutes)
+                    ).time()
+                    if any(
+                        self._intervals_overlap(start_t, end_t, o_start, o_end)
+                        for o_start, o_end in occupied
+                    ):
+                        continue
+                    has_slot = True
+                    break
+
+            if not has_slot:
+                out.append(cur)
+            cur += timedelta(days=1)
 
         return out
 
