@@ -28,9 +28,11 @@ from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
+    branches_picker_keyboard,
     categories_picker_keyboard,
     comment_choice_keyboard,
     confirm_booking_keyboard,
+    masters_picker_keyboard,
     services_picker_keyboard,
     time_picker_keyboard,
 )
@@ -146,6 +148,8 @@ async def _build_booking_confirm_text(
     booking_time: str,
     service_id: int,
     comment: str,
+    branch_name: str,
+    master_name: str,
 ) -> str:
     service = await services_repo.get_by_id(service_id)
     service_name = service.name if service is not None else f"Услуга #{service_id}"
@@ -153,12 +157,40 @@ async def _build_booking_confirm_text(
     comment_text = comment if comment else "без комментария"
     return (
         "Подтверди запись:\n"
+        f"Филиал: {branch_name}\n"
+        f"Мастер: {master_name}\n"
         f"Дата: {_human_booking_date(booking_date)}\n"
         f"Время: {booking_time}\n"
         f"Услуга: {service_name}\n"
         f"Стоимость: {service_price}\n"
         f"Комментарий: {comment_text}"
     )
+
+
+def _parse_csv_items(raw: str) -> list[str]:
+    return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
+def _mode_is_barbershop() -> bool:
+    return (get_settings().booking_mode or "").strip().lower() == "barbershop"
+
+
+def _branch_options() -> list[str]:
+    options = _parse_csv_items(get_settings().branches_csv)
+    return options or ["Основной филиал"]
+
+
+def _master_options() -> list[str]:
+    options = _parse_csv_items(get_settings().masters_csv)
+    return options or ["Илья"]
+
+
+def _category_back_callback(data: dict) -> str:
+    if data.get("booking_has_master_step"):
+        return "bk_back:master"
+    if data.get("booking_has_branch_step"):
+        return "bk_back:branch"
+    return "bk_back:menu"
 
 
 def _local_today() -> date:
@@ -256,6 +288,79 @@ async def _safe_edit_booking_message(
         await callback.message.answer(text, reply_markup=reply_markup)
 
 
+async def _show_category_step_message(message: Message, state: FSMContext) -> None:
+    services = await services_repo.list_all()
+    if not services:
+        await message.answer(
+            "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
+            "Напишите администратору и попробуйте позже."
+        )
+        return
+    categories = _build_categories_present(services)
+    if not categories:
+        await message.answer("Список услуг недоступен.")
+        return
+
+    data = await state.get_data()
+    await state.set_state(BookingStates.waiting_category)
+    prompt = await message.answer(
+        "Выбери категорию ✂️",
+        reply_markup=categories_picker_keyboard(categories, back_callback_data=_category_back_callback(data)),
+    )
+    await state.update_data(booking_prompt_message_id=prompt.message_id)
+
+
+async def _show_category_step_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    services = await services_repo.list_all()
+    categories = _build_categories_present(services)
+    if not categories:
+        await _safe_edit_booking_message(callback, "Список услуг недоступен.")
+        return
+    data = await state.get_data()
+    await state.set_state(BookingStates.waiting_category)
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери категорию ✂️",
+        reply_markup=categories_picker_keyboard(categories, back_callback_data=_category_back_callback(data)),
+    )
+
+
+async def _start_booking_flow_message(message: Message, state: FSMContext) -> None:
+    branches = _branch_options()
+    masters = _master_options()
+    is_barbershop = _mode_is_barbershop()
+
+    has_branch_step = is_barbershop and len(branches) > 1
+    has_master_step = is_barbershop and len(masters) > 1
+
+    selected_branch = branches[0]
+    selected_master = masters[0]
+    if has_master_step and get_settings().enable_any_master_option:
+        selected_master = "Любой мастер"
+
+    await state.update_data(
+        booking_has_branch_step=has_branch_step,
+        booking_has_master_step=has_master_step,
+        booking_branch=selected_branch,
+        booking_master=selected_master,
+    )
+
+    if has_branch_step:
+        await state.set_state(BookingStates.waiting_branch)
+        await message.answer("Выбери филиал:", reply_markup=branches_picker_keyboard(branches))
+        return
+
+    if has_master_step and len(masters) > 1:
+        await state.set_state(BookingStates.waiting_master)
+        await message.answer(
+            "Выбери мастера:",
+            reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
+        )
+        return
+
+    await _show_category_step_message(message, state)
+
+
 @router.message(F.text == "📅 Записаться")
 async def start_booking(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -265,26 +370,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала пройдите регистрацию: нажмите /start.")
         return
 
-    await state.set_state(BookingStates.waiting_category)
-
-    services = await services_repo.list_all()
-    if not services:
-        await message.answer(
-            "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
-            "Напишите администратору и попробуйте позже."
-        )
-        return
-
-    categories = _build_categories_present(services)
-    if not categories:
-        await message.answer("Список услуг недоступен.")
-        return
-
-    prompt = await message.answer(
-        "Выбери категорию ✂️",
-        reply_markup=categories_picker_keyboard(categories),
-    )
-    await state.update_data(booking_prompt_message_id=prompt.message_id)
+    await _start_booking_flow_message(message, state)
 
 
 @router.callback_query(F.data.startswith("bk_cat:"))
@@ -316,6 +402,73 @@ async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
     await safe_callback_answer(callback)
 
 
+@router.callback_query(F.data.startswith("bk_branch:"))
+async def choose_branch(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_branch.state:
+        await safe_callback_answer(callback, "Сначала начни запись заново.", show_alert=True)
+        return
+
+    payload = callback.data.split(":", 1)[1].strip()
+    try:
+        idx = int(payload)
+    except ValueError:
+        await safe_callback_answer(callback, "Некорректный филиал.", show_alert=True)
+        return
+
+    branches = _branch_options()
+    if idx < 0 or idx >= len(branches):
+        await safe_callback_answer(callback, "Некорректный филиал.", show_alert=True)
+        return
+
+    await state.update_data(booking_branch=branches[idx])
+    data = await state.get_data()
+    has_master_step = bool(data.get("booking_has_master_step"))
+    masters = _master_options()
+    if has_master_step and len(masters) > 1:
+        await state.set_state(BookingStates.waiting_master)
+        await _safe_edit_booking_message(
+            callback,
+            "Выбери мастера:",
+            reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
+        )
+    else:
+        default_master = masters[0] if masters else "Любой мастер"
+        if has_master_step and get_settings().enable_any_master_option:
+            default_master = "Любой мастер"
+        await state.update_data(booking_master=default_master)
+        await _show_category_step_callback(callback, state)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("bk_master:"))
+async def choose_master(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_master.state:
+        await safe_callback_answer(callback, "Сначала начни запись заново.", show_alert=True)
+        return
+
+    payload = callback.data.split(":", 1)[1].strip()
+    if payload == "any":
+        await state.update_data(booking_master="Любой мастер")
+        await _show_category_step_callback(callback, state)
+        await safe_callback_answer(callback)
+        return
+
+    try:
+        idx = int(payload)
+    except ValueError:
+        await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
+        return
+
+    masters = _master_options()
+    if idx < 0 or idx >= len(masters):
+        await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
+        return
+
+    await state.update_data(booking_master=masters[idx])
+    await _show_category_step_callback(callback, state)
+    await safe_callback_answer(callback)
+
+
 @router.callback_query(F.data == "bk_back:menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -341,26 +494,7 @@ async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext
         await safe_callback_answer(callback)
         return
 
-    services = await services_repo.list_all()
-    if not services:
-        await callback.message.answer(
-            "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
-            "Напишите администратору и попробуйте позже."
-        )
-        await safe_callback_answer(callback)
-        return
-
-    categories = _build_categories_present(services)
-    if not categories:
-        await callback.message.answer("Список услуг недоступен.")
-        await safe_callback_answer(callback)
-        return
-
-    await state.set_state(BookingStates.waiting_category)
-    await callback.message.answer(
-        "Выбери категорию ✂️",
-        reply_markup=categories_picker_keyboard(categories),
-    )
+    await _start_booking_flow_message(callback.message, state)
     await safe_callback_answer(callback)
 
 
@@ -377,7 +511,41 @@ async def back_to_category(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_edit_booking_message(
         callback,
         "Выбери категорию ✂️",
-        reply_markup=categories_picker_keyboard(categories),
+        reply_markup=categories_picker_keyboard(categories, back_callback_data=_category_back_callback(await state.get_data())),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data == "bk_back:branch")
+async def back_to_branch(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() not in {BookingStates.waiting_master.state, BookingStates.waiting_category.state}:
+        await safe_callback_answer(callback)
+        return
+    branches = _branch_options()
+    data = await state.get_data()
+    if not data.get("booking_has_branch_step"):
+        await safe_callback_answer(callback)
+        return
+    await state.set_state(BookingStates.waiting_branch)
+    await _safe_edit_booking_message(callback, "Выбери филиал:", reply_markup=branches_picker_keyboard(branches))
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data == "bk_back:master")
+async def back_to_master(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() not in {BookingStates.waiting_category.state, BookingStates.waiting_service.state}:
+        await safe_callback_answer(callback)
+        return
+    data = await state.get_data()
+    if not data.get("booking_has_master_step"):
+        await safe_callback_answer(callback)
+        return
+    masters = _master_options()
+    await state.set_state(BookingStates.waiting_master)
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери мастера:",
+        reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
     )
     await safe_callback_answer(callback)
 
@@ -556,11 +724,15 @@ async def choose_comment_mode(callback: CallbackQuery, state: FSMContext) -> Non
 
     await state.update_data(booking_comment="")
     await state.set_state(BookingStates.waiting_confirm)
+    branch_name = str(data.get("booking_branch") or "—")
+    master_name = str(data.get("booking_master") or "—")
     confirm_text = await _build_booking_confirm_text(
         booking_date=booking_date,
         booking_time=str(booking_time),
         service_id=int(service_id),
         comment="",
+        branch_name=branch_name,
+        master_name=master_name,
     )
     await safe_callback_answer(callback)
     await _safe_edit_booking_message(
@@ -589,11 +761,15 @@ async def handle_booking_comment(message: Message, state: FSMContext) -> None:
     booking_date = date.fromisoformat(str(booking_date_iso))
     await state.update_data(booking_comment=raw_comment)
     await state.set_state(BookingStates.waiting_confirm)
+    branch_name = str(data.get("booking_branch") or "—")
+    master_name = str(data.get("booking_master") or "—")
     confirm_text = await _build_booking_confirm_text(
         booking_date=booking_date,
         booking_time=str(booking_time),
         service_id=int(service_id),
         comment=raw_comment,
+        branch_name=branch_name,
+        master_name=master_name,
     )
     await message.answer(confirm_text, reply_markup=confirm_booking_keyboard())
 
@@ -607,6 +783,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_time = data.get("booking_time")
     service_id = data.get("booking_service_id")
     booking_comment = _normalize_comment(data.get("booking_comment"))
+    booking_branch = str(data.get("booking_branch") or "—")
+    booking_master = str(data.get("booking_master") or "—")
     if not booking_date_iso:
         await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
@@ -702,6 +880,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         notify_text = (
             "🔥 Новая запись\n\n"
             f"Клиент: {user.name}\n"
+            f"Филиал: {booking_branch}\n"
+            f"Мастер: {booking_master}\n"
             f"Время: {appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}\n"
             f"Услуга: {service_text}\n"
             f"Номер телефона: {user.phone}\n"
@@ -717,6 +897,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.message.answer(
         "Готово! Ты записан ✅\n\n"
+        f"Филиал: {booking_branch}\n"
+        f"Мастер: {booking_master}\n"
         f"Услуга: {service_name}\n"
         f"Дата: {_human_booking_date(appointment.date)}\n"
         f"Время: {appointment.start_time.strftime('%H:%M')}\n"

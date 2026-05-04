@@ -16,6 +16,8 @@ class RegistrationStates(StatesGroup):
 
 
 class BookingStates(StatesGroup):
+    waiting_branch = State()
+    waiting_master = State()
     waiting_category = State()
     waiting_service = State()
     waiting_date = State()

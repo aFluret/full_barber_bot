@@ -137,7 +137,10 @@ def comment_choice_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def categories_picker_keyboard(categories: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+def categories_picker_keyboard(
+    categories: list[tuple[str, str]],
+    back_callback_data: str = "bk_back:menu",
+) -> InlineKeyboardMarkup:
     """
     categories: list of (key, label)
     """
@@ -146,9 +149,27 @@ def categories_picker_keyboard(categories: list[tuple[str, str]]) -> InlineKeybo
     for key, label in categories:
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"bk_cat:{key}")])
 
-    buttons.append([InlineKeyboardButton(text="← Назад", callback_data="bk_back:menu")])
+    buttons.append([InlineKeyboardButton(text="← Назад", callback_data=back_callback_data)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def date_picker_keyboard(dates: list[date], back_callback_data: str | None = None) -> InlineKeyboardMarkup:
     return date_picker_keyboard_with_back(dates, back_callback_data=back_callback_data)
+
+
+def branches_picker_keyboard(branches: list[str]) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    for idx, label in enumerate(branches):
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"bk_branch:{idx}")])
+    buttons.append([InlineKeyboardButton(text="← Назад", callback_data="bk_back:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def masters_picker_keyboard(masters: list[str], include_any: bool = True) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    if include_any:
+        buttons.append([InlineKeyboardButton(text="Любой мастер", callback_data="bk_master:any")])
+    for idx, label in enumerate(masters):
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"bk_master:{idx}")])
+    buttons.append([InlineKeyboardButton(text="← Назад", callback_data="bk_back:branch")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
