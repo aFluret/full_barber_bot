@@ -24,6 +24,8 @@ from src.infra.db.repositories.appointments_repository import AppointmentsReposi
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepository
+from src.infra.db.repositories.masters_repository import MastersRepository
+from src.infra.db.repositories.branches_repository import BranchesRepository
 from src.app.services.schedule_service import ScheduleService
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
@@ -34,6 +36,8 @@ appointments_repo = AppointmentsRepository()
 users_repo = UsersRepository()
 services_repo = ServicesRepository()
 work_schedule_repo = WorkScheduleRepository()
+masters_repo = MastersRepository()
+branches_repo = BranchesRepository()
 schedule_service = ScheduleService()
 ADMIN_INLINE_MESSAGE_ID_KEY = "admin_inline_message_id"
 MONTHLY_PREFIX = "admin_monthly"
@@ -181,6 +185,162 @@ async def all_future_appointments(message: Message, state: FSMContext) -> None:
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━━\nВсего: {len(appts)} записи | Сумма: {total_sum} BYN")
     await message.answer("\n".join(lines))
+
+
+def _parse_hhmm_or_none(raw: str):
+    try:
+        return datetime.strptime(raw, "%H:%M").time()
+    except ValueError:
+        return None
+
+
+@router.message(Command("masters"))
+async def admin_masters_list(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+
+    masters = await masters_repo.list_all()
+    if not masters:
+        await message.answer("Мастера не найдены.")
+        return
+
+    lines = ["👨‍🔧 Мастера:\n"]
+    for m in masters:
+        status = "ON" if m.is_active else "OFF"
+        lines.append(
+            f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}"
+        )
+    lines.append(
+        "\nКоманды:\n"
+        "/master_on <master_key>\n"
+        "/master_off <master_key>\n"
+        "/master_hours <master_key> <HH:MM> <HH:MM>"
+    )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("master_on"))
+async def admin_master_on(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /master_on <master_key>")
+        return
+    ok = await masters_repo.set_active(parts[1], True)
+    await message.answer("Мастер включен ✅" if ok else "Не удалось включить мастера.")
+
+
+@router.message(Command("master_off"))
+async def admin_master_off(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /master_off <master_key>")
+        return
+    ok = await masters_repo.set_active(parts[1], False)
+    await message.answer("Мастер выключен ✅" if ok else "Не удалось выключить мастера.")
+
+
+@router.message(Command("master_hours"))
+async def admin_master_hours(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 4:
+        await message.answer("Использование: /master_hours <master_key> <HH:MM> <HH:MM>")
+        return
+    master_key = parts[1].strip()
+    start_t = _parse_hhmm_or_none(parts[2].strip())
+    end_t = _parse_hhmm_or_none(parts[3].strip())
+    if start_t is None or end_t is None:
+        await message.answer("Некорректный формат времени. Пример: 10:00 18:00")
+        return
+    if start_t >= end_t:
+        await message.answer("Время начала должно быть меньше времени окончания.")
+        return
+    ok = await masters_repo.set_work_hours(master_key, start_t, end_t)
+    await message.answer(
+        f"График мастера {master_key} обновлен ✅: {start_t.strftime('%H:%M')}–{end_t.strftime('%H:%M')}"
+        if ok
+        else "Не удалось обновить график мастера."
+    )
+
+
+@router.message(Command("branches"))
+async def admin_branches_list(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+
+    branches = await branches_repo.list_all()
+    if not branches:
+        await message.answer("Филиалы не найдены.")
+        return
+
+    lines = ["🏬 Филиалы:\n"]
+    for b in branches:
+        status = "ON" if b.is_active else "OFF"
+        lines.append(f"- #{b.id} {b.name} [{status}]")
+    lines.append("\nКоманды:\n/branch_on <id>\n/branch_off <id>")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("branch_on"))
+async def admin_branch_on(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /branch_on <id>")
+        return
+    try:
+        branch_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID филиала должен быть числом.")
+        return
+    ok = await branches_repo.set_active(branch_id, True)
+    await message.answer("Филиал включен ✅" if ok else "Не удалось включить филиал.")
+
+
+@router.message(Command("branch_off"))
+async def admin_branch_off(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /branch_off <id>")
+        return
+    try:
+        branch_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID филиала должен быть числом.")
+        return
+    ok = await branches_repo.set_active(branch_id, False)
+    await message.answer("Филиал выключен ✅" if ok else "Не удалось выключить филиал.")
 
 
 @router.message(Command("schedule"))
@@ -438,6 +598,15 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "/schedule — посмотреть текущий график работы\n"
         "/set_schedule — изменить график работы\n"
         "  (рабочие дни, время начала/конца, обед)\n\n"
+        "👨‍🔧 Мастера:\n"
+        "/masters — список мастеров и статусов\n"
+        "/master_on <key> — включить мастера\n"
+        "/master_off <key> — выключить мастера\n"
+        "/master_hours <key> 10:00 18:00 — задать часы мастера\n\n"
+        "🏬 Филиалы:\n"
+        "/branches — список филиалов и статусов\n"
+        "/branch_on <id> — включить филиал\n"
+        "/branch_off <id> — выключить филиал\n\n"
         "❌ Выход:\n"
         "/exit — выйти из админки\n"
         "  и вернуться в режим клиента",

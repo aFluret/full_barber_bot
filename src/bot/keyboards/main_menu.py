@@ -28,6 +28,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="/today"), KeyboardButton(text="/tomorrow")],
             [KeyboardButton(text="/all")],
             [KeyboardButton(text="/schedule"), KeyboardButton(text="/set_schedule")],
+            [KeyboardButton(text="/masters"), KeyboardButton(text="/branches")],
             [KeyboardButton(text="/exit")],
         ],
         resize_keyboard=True,
