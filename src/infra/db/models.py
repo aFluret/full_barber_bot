@@ -51,3 +51,23 @@ class AppointmentModel:
     master_name: Optional[str] = None
     master_key: Optional[str] = None
     comment: Optional[str] = None
+    branch_id: Optional[int] = None
+    master_id: Optional[int] = None
+
+
+@dataclass(slots=True)
+class BranchModel:
+    id: int
+    name: str
+    address: str
+    is_active: bool = True
+
+
+@dataclass(slots=True)
+class MasterModel:
+    id: int
+    master_key: str
+    name: str
+    work_start: time
+    work_end: time
+    is_active: bool = True

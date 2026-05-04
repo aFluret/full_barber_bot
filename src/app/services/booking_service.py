@@ -24,6 +24,7 @@ from src.infra.db.repositories.appointments_repository import (
 )
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.users_repository import UsersRepository
+from src.infra.db.repositories.masters_repository import MastersRepository
 from src.infra.config.settings import get_settings
 
 
@@ -42,6 +43,7 @@ class BookingService:
         self._users_repo = UsersRepository()
         self._appointments_repo = AppointmentsRepository()
         self._services_repo = ServicesRepository()
+        self._masters_repo = MastersRepository()
         self._reminder_service = ReminderService()
 
     async def get_user(self, user_id: int) -> Optional[UserModel]:
@@ -110,9 +112,14 @@ class BookingService:
             occupied = await self._appointments_repo.list_confirmed_intervals(target_date)
 
         out: list[str] = []
+        master = await self._masters_repo.get_by_key(master_key) if master_key else None
         for slot_hhmm in candidates:
             start_t = datetime.strptime(slot_hhmm, "%H:%M").time()
             end_t = (datetime.combine(target_date, start_t) + timedelta(minutes=service.duration_minutes)).time()
+
+            if master is not None:
+                if start_t < master.work_start or end_t > master.work_end:
+                    continue
 
             # Если выбираем "сегодня", скрываем уже начавшиеся слоты.
             if target_date == date.today():
@@ -249,6 +256,8 @@ class BookingService:
         target_date: date,
         service_id: int,
         time_slot_hhmm: str,
+        branch_id: Optional[int] = None,
+        master_id: Optional[int] = None,
         branch_name: Optional[str] = None,
         master_name: Optional[str] = None,
         master_key: Optional[str] = None,
@@ -283,6 +292,8 @@ class BookingService:
                 service_id=service_id,
                 start_time=start_t,
                 end_time=end_t,
+                branch_id=branch_id,
+                master_id=master_id,
                 branch_name=branch_name,
                 master_name=master_name,
                 master_key=master_key,
@@ -345,6 +356,8 @@ class BookingService:
                 target_date=target_date,
                 service_id=service.id,
                 time_slot_hhmm=time_slot_hhmm,
+                branch_id=source.branch_id,
+                master_id=source.master_id,
                 branch_name=source.branch_name,
                 master_name=source.master_name,
                 master_key=source.master_key,
@@ -359,6 +372,8 @@ class BookingService:
                     service_id=source_service_id,
                     start_time=source_start,
                     end_time=source_end,
+                    branch_id=source.branch_id,
+                    master_id=source.master_id,
                     branch_name=source.branch_name,
                     master_name=source.master_name,
                     master_key=source.master_key,

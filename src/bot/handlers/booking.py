@@ -26,6 +26,8 @@ from src.app.services.booking_service import (
 from src.infra.db.repositories.appointments_repository import SlotUnavailableError
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
+from src.infra.db.repositories.branches_repository import BranchesRepository
+from src.infra.db.repositories.masters_repository import MastersRepository
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
     branches_picker_keyboard,
@@ -45,6 +47,8 @@ router = Router()
 booking_service = BookingService()
 users_repo = UsersRepository()
 services_repo = ServicesRepository()
+branches_repo = BranchesRepository()
+masters_repo = MastersRepository()
 
 SERVICE_CATEGORIES: dict[str, list[str]] = {
     "cuts": [
@@ -175,24 +179,20 @@ def _mode_is_barbershop() -> bool:
     return (get_settings().booking_mode or "").strip().lower() == "barbershop"
 
 
-def _branch_options() -> list[str]:
-    options = _parse_csv_items(get_settings().branches_csv)
-    return options or ["Основной филиал"]
+async def _branch_records() -> list[tuple[int, str]]:
+    rows = await branches_repo.list_active()
+    if not rows:
+        options = _parse_csv_items(get_settings().branches_csv) or ["Основной филиал"]
+        return [(idx + 1, name) for idx, name in enumerate(options)]
+    return [(row.id, row.name) for row in rows]
 
 
-def _master_records() -> list[tuple[str, str]]:
-    options = _parse_csv_items(get_settings().masters_csv) or ["Илья"]
-    out: list[tuple[str, str]] = []
-    for idx, name in enumerate(options):
-        out.append((f"m{idx + 1}", name))
-    return out
-
-
-def _master_name_by_key(master_key: str) -> str:
-    for key, name in _master_records():
-        if key == master_key:
-            return name
-    return "Мастер"
+async def _master_records(branch_id: int | None = None) -> list[tuple[int, str, str]]:
+    rows = await masters_repo.list_active(branch_id=branch_id)
+    if not rows:
+        options = _parse_csv_items(get_settings().masters_csv) or ["Илья"]
+        return [(idx + 1, f"m{idx + 1}", name) for idx, name in enumerate(options)]
+    return [(row.id, row.master_key, row.name) for row in rows]
 
 
 def _category_back_callback(data: dict) -> str:
@@ -256,7 +256,7 @@ async def _render_calendar(
         return
     if master_key == "any":
         unavailable_sets: list[set[date]] = []
-        for mk, _ in _master_records():
+        for _, mk, _ in await _master_records():
             days = await _build_booked_days_for_month(
                 year=year,
                 month=month,
@@ -358,30 +358,36 @@ async def _show_category_step_callback(callback: CallbackQuery, state: FSMContex
 
 
 async def _start_booking_flow_message(message: Message, state: FSMContext) -> None:
-    branches = _branch_options()
-    master_records = _master_records()
+    branch_records = await _branch_records()
+    master_records = await _master_records()
     is_barbershop = _mode_is_barbershop()
 
-    has_branch_step = is_barbershop and len(branches) > 1
+    has_branch_step = is_barbershop and len(branch_records) > 1
     has_master_step = is_barbershop and len(master_records) > 1
 
-    selected_branch = branches[0]
-    selected_master_key, selected_master = master_records[0]
+    selected_branch_id, selected_branch = branch_records[0]
+    selected_master_id, selected_master_key, selected_master = master_records[0]
     if has_master_step and get_settings().enable_any_master_option:
+        selected_master_id = 0
         selected_master_key = "any"
         selected_master = "Любой мастер"
 
     await state.update_data(
         booking_has_branch_step=has_branch_step,
         booking_has_master_step=has_master_step,
+        booking_branch_id=selected_branch_id,
         booking_branch=selected_branch,
+        booking_master_id=selected_master_id if selected_master_id else None,
         booking_master_key=selected_master_key,
         booking_master=selected_master,
     )
 
     if has_branch_step:
         await state.set_state(BookingStates.waiting_branch)
-        await message.answer("Выбери филиал:", reply_markup=branches_picker_keyboard(branches))
+        await message.answer(
+            "Выбери филиал:",
+            reply_markup=branches_picker_keyboard([name for _, name in branch_records]),
+        )
         return
 
     if has_master_step and len(master_records) > 1:
@@ -452,31 +458,39 @@ async def choose_branch(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_callback_answer(callback, "Некорректный филиал.", show_alert=True)
         return
 
-    branches = _branch_options()
-    if idx < 0 or idx >= len(branches):
+    branch_records = await _branch_records()
+    if idx < 0 or idx >= len(branch_records):
         await safe_callback_answer(callback, "Некорректный филиал.", show_alert=True)
         return
 
-    await state.update_data(booking_branch=branches[idx])
+    selected_branch_id, selected_branch_name = branch_records[idx]
+    await state.update_data(booking_branch_id=selected_branch_id, booking_branch=selected_branch_name)
     data = await state.get_data()
     has_master_step = bool(data.get("booking_has_master_step"))
-    master_records = _master_records()
+    master_records = await _master_records(branch_id=selected_branch_id)
     if has_master_step and len(master_records) > 1:
         await state.set_state(BookingStates.waiting_master)
         await _safe_edit_booking_message(
             callback,
             "Выбери мастера:",
             reply_markup=masters_picker_keyboard(
-                [name for _, name in master_records],
+                [name for _, _, name in master_records],
                 include_any=get_settings().enable_any_master_option,
             ),
         )
     else:
-        default_key, default_master = master_records[0] if master_records else ("any", "Любой мастер")
+        default_id, default_key, default_master = (
+            master_records[0] if master_records else (0, "any", "Любой мастер")
+        )
         if has_master_step and get_settings().enable_any_master_option:
+            default_id = 0
             default_key = "any"
             default_master = "Любой мастер"
-        await state.update_data(booking_master_key=default_key, booking_master=default_master)
+        await state.update_data(
+            booking_master_id=default_id if default_id else None,
+            booking_master_key=default_key,
+            booking_master=default_master,
+        )
         await _show_category_step_callback(callback, state)
     await safe_callback_answer(callback)
 
@@ -500,13 +514,20 @@ async def choose_master(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
         return
 
-    master_records = _master_records()
+    data = await state.get_data()
+    branch_id_raw = data.get("booking_branch_id")
+    branch_id = int(branch_id_raw) if branch_id_raw is not None else None
+    master_records = await _master_records(branch_id=branch_id)
     if idx < 0 or idx >= len(master_records):
         await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
         return
 
-    master_key, master_name = master_records[idx]
-    await state.update_data(booking_master_key=master_key, booking_master=master_name)
+    master_id, master_key, master_name = master_records[idx]
+    await state.update_data(
+        booking_master_id=master_id,
+        booking_master_key=master_key,
+        booking_master=master_name,
+    )
     await _show_category_step_callback(callback, state)
     await safe_callback_answer(callback)
 
@@ -563,13 +584,17 @@ async def back_to_branch(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() not in {BookingStates.waiting_master.state, BookingStates.waiting_category.state}:
         await safe_callback_answer(callback)
         return
-    branches = _branch_options()
+    branch_records = await _branch_records()
     data = await state.get_data()
     if not data.get("booking_has_branch_step"):
         await safe_callback_answer(callback)
         return
     await state.set_state(BookingStates.waiting_branch)
-    await _safe_edit_booking_message(callback, "Выбери филиал:", reply_markup=branches_picker_keyboard(branches))
+    await _safe_edit_booking_message(
+        callback,
+        "Выбери филиал:",
+        reply_markup=branches_picker_keyboard([name for _, name in branch_records]),
+    )
     await safe_callback_answer(callback)
 
 
@@ -582,13 +607,15 @@ async def back_to_master(callback: CallbackQuery, state: FSMContext) -> None:
     if not data.get("booking_has_master_step"):
         await safe_callback_answer(callback)
         return
-    master_records = _master_records()
+    branch_id_raw = data.get("booking_branch_id")
+    branch_id = int(branch_id_raw) if branch_id_raw is not None else None
+    master_records = await _master_records(branch_id=branch_id)
     await state.set_state(BookingStates.waiting_master)
     await _safe_edit_booking_message(
         callback,
         "Выбери мастера:",
         reply_markup=masters_picker_keyboard(
-            [name for _, name in master_records],
+            [name for _, _, name in master_records],
             include_any=get_settings().enable_any_master_option,
         ),
     )
@@ -681,14 +708,18 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
 
     master_key = str(data.get("booking_master_key") or "")
     if master_key == "any":
+        branch_id_raw = data.get("booking_branch_id")
+        branch_id = int(branch_id_raw) if branch_id_raw is not None else None
+        masters = [(mk, name) for _, mk, name in await _master_records(branch_id=branch_id)]
         slot_map = await booking_service.list_available_slots_for_any_master(
             target_date=target_date,
             service_id=int(service_id),
-            masters=_master_records(),
+            masters=masters,
         )
         slots = sorted(slot_map.keys())
         await state.update_data(
             booking_any_master_slot_map=slot_map,
+            booking_master_resolved_id=None,
             booking_master_resolved_key=None,
             booking_master_resolved=None,
         )
@@ -747,14 +778,20 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
             )
             return
         resolved_key, resolved_name = str(resolved[0]), str(resolved[1])
+        resolved_master = await masters_repo.get_by_key(resolved_key)
+        resolved_id = resolved_master.id if resolved_master is not None else None
         await state.update_data(
+            booking_master_resolved_id=resolved_id,
             booking_master_resolved_key=resolved_key,
             booking_master_resolved=resolved_name,
         )
     else:
         resolved_key = master_key
         resolved_name = str(data.get("booking_master") or "—")
+        resolved_id_raw = data.get("booking_master_id")
+        resolved_id = int(resolved_id_raw) if resolved_id_raw is not None else None
         await state.update_data(
+            booking_master_resolved_id=resolved_id,
             booking_master_resolved_key=resolved_key,
             booking_master_resolved=resolved_name,
         )
@@ -790,14 +827,18 @@ async def choose_comment_mode(callback: CallbackQuery, state: FSMContext) -> Non
         await state.set_state(BookingStates.waiting_time)
         master_key = str(data.get("booking_master_key") or "")
         if master_key == "any":
+            branch_id_raw = data.get("booking_branch_id")
+            branch_id = int(branch_id_raw) if branch_id_raw is not None else None
+            masters = [(mk, name) for _, mk, name in await _master_records(branch_id=branch_id)]
             slot_map = await booking_service.list_available_slots_for_any_master(
                 target_date=booking_date,
                 service_id=int(service_id),
-                masters=_master_records(),
+                masters=masters,
             )
             slots = sorted(slot_map.keys())
             await state.update_data(
                 booking_any_master_slot_map=slot_map,
+                booking_master_resolved_id=None,
                 booking_master_resolved_key=None,
                 booking_master_resolved=None,
             )
@@ -890,7 +931,11 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_time = data.get("booking_time")
     service_id = data.get("booking_service_id")
     booking_comment = _normalize_comment(data.get("booking_comment"))
+    booking_branch_id_raw = data.get("booking_branch_id")
+    booking_branch_id = int(booking_branch_id_raw) if booking_branch_id_raw is not None else None
     booking_branch = str(data.get("booking_branch") or "—")
+    booking_master_id_raw = data.get("booking_master_resolved_id") or data.get("booking_master_id")
+    booking_master_id = int(booking_master_id_raw) if booking_master_id_raw is not None else None
     booking_master = str(data.get("booking_master_resolved") or data.get("booking_master") or "—")
     booking_master_key = str(data.get("booking_master_resolved_key") or data.get("booking_master_key") or "")
     if not booking_date_iso:
@@ -929,6 +974,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             target_date=booking_date,
             service_id=int(service_id),
             time_slot_hhmm=str(booking_time),
+            branch_id=booking_branch_id,
+            master_id=booking_master_id,
             branch_name=booking_branch,
             master_name=booking_master,
             master_key=(booking_master_key if booking_master_key and booking_master_key != "any" else None),
@@ -944,14 +991,18 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
             return
         if booking_master_key == "any":
+            branch_id_raw = data.get("booking_branch_id")
+            branch_id = int(branch_id_raw) if branch_id_raw is not None else None
+            masters = [(mk, name) for _, mk, name in await _master_records(branch_id=branch_id)]
             slot_map = await booking_service.list_available_slots_for_any_master(
                 target_date=booking_date,
                 service_id=int(service_id),
-                masters=_master_records(),
+                masters=masters,
             )
             slots = sorted(slot_map.keys())
             await state.update_data(
                 booking_any_master_slot_map=slot_map,
+                booking_master_resolved_id=None,
                 booking_master_resolved_key=None,
                 booking_master_resolved=None,
             )

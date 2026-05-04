@@ -26,7 +26,7 @@ class AppointmentsRepository:
     BASE_SELECT = "id,user_id,date,service_id,start_time,end_time,status,created_at"
     EXT_SELECT = (
         "id,user_id,date,service_id,start_time,end_time,status,created_at,"
-        "branch_name,master_name,master_key,comment"
+        "branch_name,master_name,master_key,comment,branch_id,master_id"
     )
 
     @staticmethod
@@ -73,6 +73,8 @@ class AppointmentsRepository:
             master_name=(str(row.get("master_name")) if row.get("master_name") is not None else None),
             master_key=(str(row.get("master_key")) if row.get("master_key") is not None else None),
             comment=(str(row.get("comment")) if row.get("comment") is not None else None),
+            branch_id=(int(row["branch_id"]) if row.get("branch_id") is not None else None),
+            master_id=(int(row["master_id"]) if row.get("master_id") is not None else None),
         )
 
     async def get_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
@@ -232,6 +234,8 @@ class AppointmentsRepository:
         service_id: int,
         start_time: time,
         end_time: time,
+        branch_id: Optional[int] = None,
+        master_id: Optional[int] = None,
         branch_name: Optional[str] = None,
         master_name: Optional[str] = None,
         master_key: Optional[str] = None,
@@ -261,6 +265,8 @@ class AppointmentsRepository:
                     "master_name": master_name,
                     "master_key": master_key,
                     "comment": comment,
+                    "branch_id": branch_id,
+                    "master_id": master_id,
                 }
             )
 
