@@ -140,9 +140,21 @@ async def my_appointments(message: Message) -> None:
                 f"   Статус: {_status_label(appt.status, appt.date, appt.end_time)}"
             )
 
+    actions: list[list[InlineKeyboardButton]] = []
+    if active:
+        first_active = active[0]
+        actions.append(
+            [
+                InlineKeyboardButton(text="🔄 Перенести активную", callback_data=f"ap_rs_start:{first_active.id}"),
+                InlineKeyboardButton(text="❌ Отменить активную", callback_data=f"ap_cancel_prompt:{first_active.id}"),
+            ]
+        )
+    actions.append([InlineKeyboardButton(text="📅 Записаться снова", callback_data="bk_restart_service")])
+
+    await message.answer("\n".join(lines), reply_markup=menu_keyboard_for_role(user_role))
     await message.answer(
-        "\n".join(lines),
-        reply_markup=menu_keyboard_for_role(user_role),
+        "Быстрые действия:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=actions),
     )
 
 
@@ -159,17 +171,34 @@ async def cancel_appointment(message: Message, state: FSMContext) -> None:
         await message.answer(f"{user_name}, активной записи не найдено.", reply_markup=menu_keyboard_for_role(user_role))
         return
 
-    await message.answer(
-        "Подтверди отмену записи:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да, отменить", callback_data=f"ap_cancel_yes:{appt.id}"),
-                    InlineKeyboardButton(text="↩️ Нет", callback_data="ap_cancel_no"),
-                ]
+    await message.answer("Подтверди отмену записи:", reply_markup=_cancel_confirm_keyboard(appt.id))
+
+
+def _cancel_confirm_keyboard(appointment_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, отменить", callback_data=f"ap_cancel_yes:{appointment_id}"),
+                InlineKeyboardButton(text="↩️ Нет", callback_data="ap_cancel_no"),
             ]
-        ),
+        ]
     )
+
+
+@router.callback_query(F.data.startswith("ap_cancel_prompt:"))
+async def cancel_prompt_from_list(callback: CallbackQuery) -> None:
+    payload = callback.data.split(":", 1)[1]
+    try:
+        appointment_id = int(payload)
+    except ValueError:
+        await safe_callback_answer(callback, "Некорректная запись", show_alert=True)
+        return
+    appt = await booking_service.get_appointment_by_id(appointment_id)
+    if appt is None or appt.user_id != callback.from_user.id or not _is_active(appt.status, appt.date, appt.end_time):
+        await safe_callback_answer(callback, "Запись уже неактивна", show_alert=True)
+        return
+    await safe_callback_answer(callback)
+    await _safe_edit(callback, "Подтверди отмену записи:", reply_markup=_cancel_confirm_keyboard(appointment_id))
 
 
 @router.callback_query(F.data == "ap_cancel_no")
@@ -337,6 +366,35 @@ async def start_reschedule(message: Message, state: FSMContext) -> None:
     today = date.today()
     booked = await _build_booked_days_for_month(today.year, today.month, active.service_id)
     await message.answer(
+        "Выбери новую дату:",
+        reply_markup=_reschedule_calendar_keyboard(today.year, today.month, booked),
+    )
+
+
+@router.callback_query(F.data.startswith("ap_rs_start:"))
+async def start_reschedule_from_list(callback: CallbackQuery, state: FSMContext) -> None:
+    payload = callback.data.split(":", 1)[1]
+    try:
+        appointment_id = int(payload)
+    except ValueError:
+        await safe_callback_answer(callback, "Некорректная запись", show_alert=True)
+        return
+    appt = await booking_service.get_appointment_by_id(appointment_id)
+    if appt is None or appt.user_id != callback.from_user.id or not _is_active(appt.status, appt.date, appt.end_time):
+        await safe_callback_answer(callback, "Запись уже неактивна", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(RescheduleStates.waiting_date)
+    await state.update_data(
+        reschedule_appointment_id=appt.id,
+        reschedule_service_id=appt.service_id,
+    )
+    today = date.today()
+    booked = await _build_booked_days_for_month(today.year, today.month, appt.service_id)
+    await safe_callback_answer(callback)
+    await _safe_edit(
+        callback,
         "Выбери новую дату:",
         reply_markup=_reschedule_calendar_keyboard(today.year, today.month, booked),
     )

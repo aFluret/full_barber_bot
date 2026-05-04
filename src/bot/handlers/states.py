@@ -48,3 +48,7 @@ class RescheduleStates(StatesGroup):
     waiting_time = State()
     waiting_confirm = State()
 
+
+class SupportStates(StatesGroup):
+    waiting_message = State()
+
