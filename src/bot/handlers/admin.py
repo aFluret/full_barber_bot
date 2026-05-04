@@ -230,7 +230,7 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
             ]
         )
 
-    lines.append("\nДля точного времени: /master_hours <master_key> <HH:MM> <HH:MM>")
+    lines.append("\nДля точного времени: /master_hours &lt;master_key&gt; &lt;HH:MM&gt; &lt;HH:MM&gt;")
     keyboard.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_master:refresh")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -281,7 +281,7 @@ async def admin_master_on(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").strip().split()
     if len(parts) != 2:
-        await message.answer("Использование: /master_on <master_key>")
+        await message.answer("Использование: /master_on &lt;master_key&gt;")
         return
     ok = await masters_repo.set_active(parts[1], True)
     await message.answer("Мастер включен ✅" if ok else "Не удалось включить мастера.")
@@ -296,7 +296,7 @@ async def admin_master_off(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").strip().split()
     if len(parts) != 2:
-        await message.answer("Использование: /master_off <master_key>")
+        await message.answer("Использование: /master_off &lt;master_key&gt;")
         return
     ok = await masters_repo.set_active(parts[1], False)
     await message.answer("Мастер выключен ✅" if ok else "Не удалось выключить мастера.")
@@ -311,7 +311,7 @@ async def admin_master_hours(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").strip().split()
     if len(parts) != 4:
-        await message.answer("Использование: /master_hours <master_key> <HH:MM> <HH:MM>")
+        await message.answer("Использование: /master_hours &lt;master_key&gt; &lt;HH:MM&gt; &lt;HH:MM&gt;")
         return
     master_key = parts[1].strip()
     start_t = _parse_hhmm_or_none(parts[2].strip())
@@ -352,7 +352,7 @@ async def admin_branch_on(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").strip().split()
     if len(parts) != 2:
-        await message.answer("Использование: /branch_on <id>")
+        await message.answer("Использование: /branch_on &lt;id&gt;")
         return
     try:
         branch_id = int(parts[1])
@@ -372,7 +372,7 @@ async def admin_branch_off(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").strip().split()
     if len(parts) != 2:
-        await message.answer("Использование: /branch_off <id>")
+        await message.answer("Использование: /branch_off &lt;id&gt;")
         return
     try:
         branch_id = int(parts[1])
@@ -399,7 +399,7 @@ async def admin_master_toggle(callback: CallbackQuery, state: FSMContext) -> Non
         await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
         return
     try:
-        _, _, _, master_key, current = callback.data.split(":")
+        _, _, master_key, current = callback.data.split(":")
         current_is_on = bool(int(current))
     except Exception:
         await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
@@ -416,7 +416,7 @@ async def admin_master_set_hours_preset(callback: CallbackQuery, state: FSMConte
         await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
         return
     try:
-        _, _, _, master_key, start_raw, end_raw = callback.data.split(":")
+        _, _, master_key, start_raw, end_raw = callback.data.split(":")
     except Exception:
         await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
         return
@@ -447,7 +447,7 @@ async def admin_branch_toggle(callback: CallbackQuery, state: FSMContext) -> Non
         await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
         return
     try:
-        _, _, _, branch_id_raw, current = callback.data.split(":")
+        _, _, branch_id_raw, current = callback.data.split(":")
         branch_id = int(branch_id_raw)
         current_is_on = bool(int(current))
     except Exception:
@@ -716,13 +716,13 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "  (рабочие дни, время начала/конца, обед)\n\n"
         "👨‍🔧 Мастера:\n"
         "/masters — список мастеров и статусов\n"
-        "/master_on <key> — включить мастера\n"
-        "/master_off <key> — выключить мастера\n"
-        "/master_hours <key> 10:00 18:00 — задать часы мастера\n\n"
+        "/master_on &lt;key&gt; — включить мастера\n"
+        "/master_off &lt;key&gt; — выключить мастера\n"
+        "/master_hours &lt;key&gt; 10:00 18:00 — задать часы мастера\n\n"
         "🏬 Филиалы:\n"
         "/branches — список филиалов и статусов\n"
-        "/branch_on <id> — включить филиал\n"
-        "/branch_off <id> — выключить филиал\n\n"
+        "/branch_on &lt;id&gt; — включить филиал\n"
+        "/branch_off &lt;id&gt; — выключить филиал\n\n"
         "❌ Выход:\n"
         "/exit — выйти из админки\n"
         "  и вернуться в режим клиента",
