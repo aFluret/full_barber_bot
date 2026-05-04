@@ -194,6 +194,71 @@ def _parse_hhmm_or_none(raw: str):
         return None
 
 
+def _parse_hhmm_compact_or_none(raw: str):
+    if len(raw) != 4 or not raw.isdigit():
+        return None
+    return _parse_hhmm_or_none(f"{raw[:2]}:{raw[2:]}")
+
+
+async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
+    masters = await masters_repo.list_all()
+    if not masters:
+        return "Мастера не найдены.", InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_master:refresh")]]
+        )
+
+    lines = ["👨‍🔧 Управление мастерами:\n"]
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for m in masters:
+        status = "ON" if m.is_active else "OFF"
+        lines.append(
+            f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}"
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'⛔ Выключить' if m.is_active else '✅ Включить'} {m.name}",
+                    callback_data=f"admin_master:toggle:{m.master_key}:{1 if m.is_active else 0}",
+                )
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(text="09-17", callback_data=f"admin_master:set:{m.master_key}:0900:1700"),
+                InlineKeyboardButton(text="10-18", callback_data=f"admin_master:set:{m.master_key}:1000:1800"),
+                InlineKeyboardButton(text="12-20", callback_data=f"admin_master:set:{m.master_key}:1200:2000"),
+            ]
+        )
+
+    lines.append("\nДля точного времени: /master_hours <master_key> <HH:MM> <HH:MM>")
+    keyboard.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_master:refresh")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+async def _branches_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
+    branches = await branches_repo.list_all()
+    if not branches:
+        return "Филиалы не найдены.", InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_branch:refresh")]]
+        )
+
+    lines = ["🏬 Управление филиалами:\n"]
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for b in branches:
+        status = "ON" if b.is_active else "OFF"
+        lines.append(f"- #{b.id} {b.name} [{status}]")
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'⛔ Выключить' if b.is_active else '✅ Включить'} #{b.id} {b.name}",
+                    callback_data=f"admin_branch:toggle:{b.id}:{1 if b.is_active else 0}",
+                )
+            ]
+        )
+    keyboard.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_branch:refresh")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 @router.message(Command("masters"))
 async def admin_masters_list(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
@@ -203,24 +268,8 @@ async def admin_masters_list(message: Message, state: FSMContext) -> None:
         return
     await _delete_tracked_admin_inline_message(message, state)
 
-    masters = await masters_repo.list_all()
-    if not masters:
-        await message.answer("Мастера не найдены.")
-        return
-
-    lines = ["👨‍🔧 Мастера:\n"]
-    for m in masters:
-        status = "ON" if m.is_active else "OFF"
-        lines.append(
-            f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}"
-        )
-    lines.append(
-        "\nКоманды:\n"
-        "/master_on <master_key>\n"
-        "/master_off <master_key>\n"
-        "/master_hours <master_key> <HH:MM> <HH:MM>"
-    )
-    await message.answer("\n".join(lines))
+    text, kb = await _masters_panel_text_and_keyboard()
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("master_on"))
@@ -290,17 +339,8 @@ async def admin_branches_list(message: Message, state: FSMContext) -> None:
         return
     await _delete_tracked_admin_inline_message(message, state)
 
-    branches = await branches_repo.list_all()
-    if not branches:
-        await message.answer("Филиалы не найдены.")
-        return
-
-    lines = ["🏬 Филиалы:\n"]
-    for b in branches:
-        status = "ON" if b.is_active else "OFF"
-        lines.append(f"- #{b.id} {b.name} [{status}]")
-    lines.append("\nКоманды:\n/branch_on <id>\n/branch_off <id>")
-    await message.answer("\n".join(lines))
+    text, kb = await _branches_panel_text_and_keyboard()
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("branch_on"))
@@ -341,6 +381,82 @@ async def admin_branch_off(message: Message, state: FSMContext) -> None:
         return
     ok = await branches_repo.set_active(branch_id, False)
     await message.answer("Филиал выключен ✅" if ok else "Не удалось выключить филиал.")
+
+
+@router.callback_query(F.data == "admin_master:refresh")
+async def admin_master_refresh(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    text, kb = await _masters_panel_text_and_keyboard()
+    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("admin_master:toggle:"))
+async def admin_master_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    try:
+        _, _, _, master_key, current = callback.data.split(":")
+        current_is_on = bool(int(current))
+    except Exception:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    await masters_repo.set_active(master_key, not current_is_on)
+    text, kb = await _masters_panel_text_and_keyboard()
+    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("admin_master:set:"))
+async def admin_master_set_hours_preset(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    try:
+        _, _, _, master_key, start_raw, end_raw = callback.data.split(":")
+    except Exception:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    start_t = _parse_hhmm_compact_or_none(start_raw)
+    end_t = _parse_hhmm_compact_or_none(end_raw)
+    if start_t is None or end_t is None or start_t >= end_t:
+        await safe_callback_answer(callback, "Некорректный диапазон времени", show_alert=True)
+        return
+    await masters_repo.set_work_hours(master_key, start_t, end_t)
+    text, kb = await _masters_panel_text_and_keyboard()
+    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data == "admin_branch:refresh")
+async def admin_branch_refresh(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    text, kb = await _branches_panel_text_and_keyboard()
+    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("admin_branch:toggle:"))
+async def admin_branch_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    try:
+        _, _, _, branch_id_raw, current = callback.data.split(":")
+        branch_id = int(branch_id_raw)
+        current_is_on = bool(int(current))
+    except Exception:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    await branches_repo.set_active(branch_id, not current_is_on)
+    text, kb = await _branches_panel_text_and_keyboard()
+    await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
 
 
 @router.message(Command("schedule"))
