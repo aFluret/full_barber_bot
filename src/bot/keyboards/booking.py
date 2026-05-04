@@ -127,6 +127,16 @@ def confirm_booking_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def comment_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Добавить комментарий", callback_data="bk_comment:add")],
+            [InlineKeyboardButton(text="➡️ Без комментария", callback_data="bk_comment:skip")],
+            [InlineKeyboardButton(text="← Назад ко времени", callback_data="bk_comment:back_time")],
+        ]
+    )
+
+
 def categories_picker_keyboard(categories: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     """
     categories: list of (key, label)

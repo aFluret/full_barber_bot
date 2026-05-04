@@ -20,6 +20,7 @@ class BookingStates(StatesGroup):
     waiting_service = State()
     waiting_date = State()
     waiting_time = State()
+    waiting_comment = State()
     waiting_confirm = State()
 
 

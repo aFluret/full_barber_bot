@@ -29,6 +29,7 @@ from src.infra.db.repositories.services_repository import ServicesRepository
 from src.bot.handlers.states import BookingStates
 from src.bot.keyboards.booking import (
     categories_picker_keyboard,
+    comment_choice_keyboard,
     confirm_booking_keyboard,
     services_picker_keyboard,
     time_picker_keyboard,
@@ -130,6 +131,34 @@ def _human_booking_date(d: date) -> str:
     else:
         suffix = RU_WEEKDAY_FULL[d.weekday()]
     return f"{d.day} {RU_MONTHS_GEN[d.month]} ({suffix})"
+
+
+def _normalize_comment(raw: str | None) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    return value[:300]
+
+
+async def _build_booking_confirm_text(
+    *,
+    booking_date: date,
+    booking_time: str,
+    service_id: int,
+    comment: str,
+) -> str:
+    service = await services_repo.get_by_id(service_id)
+    service_name = service.name if service is not None else f"Услуга #{service_id}"
+    service_price = f"{service.price_byn} BYN" if service is not None else "уточняется"
+    comment_text = comment if comment else "без комментария"
+    return (
+        "Подтверди запись:\n"
+        f"Дата: {_human_booking_date(booking_date)}\n"
+        f"Время: {booking_time}\n"
+        f"Услуга: {service_name}\n"
+        f"Стоимость: {service_price}\n"
+        f"Комментарий: {comment_text}"
+    )
 
 
 def _local_today() -> date:
@@ -474,15 +503,99 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     await state.update_data(booking_time=time_slot)
-    await state.set_state(BookingStates.waiting_confirm)
-
-    booking_date = date.fromisoformat(str(booking_date_iso))
+    await state.set_state(BookingStates.waiting_comment)
+    await safe_callback_answer(callback)
     await _safe_edit_booking_message(
         callback,
-        f"Подтверди запись:\n{_human_booking_date(booking_date)} в {time_slot}",
-        reply_markup=confirm_booking_keyboard(),
+        "Хочешь добавить комментарий к записи?\n"
+        "Например: «Опоздаю на 10 минут» или «Нужна стрижка + борода».",
+        reply_markup=comment_choice_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("bk_comment:"))
+async def choose_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_comment.state:
+        await safe_callback_answer(callback, "Сначала выбери время.", show_alert=True)
+        return
+
+    action = callback.data.split(":", 1)[1].strip()
+    data = await state.get_data()
+    booking_date_iso = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    service_id = data.get("booking_service_id")
+    if not booking_date_iso or not booking_time or not service_id:
+        await safe_callback_answer(callback, "Недостаточно данных. Начни запись заново.", show_alert=True)
+        return
+    booking_date = date.fromisoformat(str(booking_date_iso))
+
+    if action == "back_time":
+        await state.set_state(BookingStates.waiting_time)
+        slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
+        await safe_callback_answer(callback)
+        await _safe_edit_booking_message(
+            callback,
+            f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
+            reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
+        )
+        return
+
+    if action == "add":
+        await safe_callback_answer(callback)
+        await _safe_edit_booking_message(
+            callback,
+            "Напиши комментарий одним сообщением.\n"
+            "Если комментарий не нужен, нажми кнопку «Без комментария».",
+            reply_markup=comment_choice_keyboard(),
+        )
+        return
+
+    if action != "skip":
+        await safe_callback_answer(callback)
+        return
+
+    await state.update_data(booking_comment="")
+    await state.set_state(BookingStates.waiting_confirm)
+    confirm_text = await _build_booking_confirm_text(
+        booking_date=booking_date,
+        booking_time=str(booking_time),
+        service_id=int(service_id),
+        comment="",
     )
     await safe_callback_answer(callback)
+    await _safe_edit_booking_message(
+        callback,
+        confirm_text,
+        reply_markup=confirm_booking_keyboard(),
+    )
+
+
+@router.message(BookingStates.waiting_comment)
+async def handle_booking_comment(message: Message, state: FSMContext) -> None:
+    raw_comment = _normalize_comment(message.text)
+    if not raw_comment:
+        await message.answer("Комментарий пустой. Напиши текст или нажми «Без комментария».")
+        return
+
+    data = await state.get_data()
+    booking_date_iso = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    service_id = data.get("booking_service_id")
+    if not booking_date_iso or not booking_time or not service_id:
+        await message.answer("Недостаточно данных. Начни запись заново через «📅 Записаться».")
+        await state.clear()
+        return
+
+    booking_date = date.fromisoformat(str(booking_date_iso))
+    await state.update_data(booking_comment=raw_comment)
+    await state.set_state(BookingStates.waiting_confirm)
+    confirm_text = await _build_booking_confirm_text(
+        booking_date=booking_date,
+        booking_time=str(booking_time),
+        service_id=int(service_id),
+        comment=raw_comment,
+    )
+    await message.answer(confirm_text, reply_markup=confirm_booking_keyboard())
 
 
 @router.callback_query(F.data.startswith("bk_confirm:"))
@@ -493,6 +606,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_date_iso = data.get("booking_date")
     booking_time = data.get("booking_time")
     service_id = data.get("booking_service_id")
+    booking_comment = _normalize_comment(data.get("booking_comment"))
     if not booking_date_iso:
         await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
@@ -500,27 +614,14 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_date = date.fromisoformat(str(booking_date_iso))
 
     if action == "0":
-        # Назад к выбору времени.
-        await state.set_state(BookingStates.waiting_time)
-        if not service_id:
-            await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
-            return
-        slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
-        if not slots:
-            await state.set_state(BookingStates.waiting_date)
-            await _render_calendar(
-                callback,
-                state,
-                year=booking_date.year,
-                month=booking_date.month,
-                title="Свободных мест больше нет. Выбери другую дату:",
-            )
-        else:
-            await _safe_edit_booking_message(
-                callback,
-                f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
-                reply_markup=time_picker_keyboard(slots, back_callback_data="bk_back:date"),
-            )
+        # Назад к шагу комментария (а оттуда уже можно вернуться к времени).
+        await state.set_state(BookingStates.waiting_comment)
+        await _safe_edit_booking_message(
+            callback,
+            "Хочешь добавить комментарий к записи?\n"
+            "Например: «Опоздаю на 10 минут» или «Нужна стрижка + борода».",
+            reply_markup=comment_choice_keyboard(),
+        )
         await safe_callback_answer(callback)
         return
 
@@ -597,12 +698,14 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         service_text = (
             f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appointment.service_id}"
         )
+        comment_text = booking_comment if booking_comment else "без комментария"
         notify_text = (
             "🔥 Новая запись\n\n"
             f"Клиент: {user.name}\n"
             f"Время: {appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}\n"
             f"Услуга: {service_text}\n"
-            f"Номер телефона: {user.phone}"
+            f"Номер телефона: {user.phone}\n"
+            f"Комментарий: {comment_text}"
         )
         await asyncio.gather(
             *[
@@ -618,6 +721,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         f"Дата: {_human_booking_date(appointment.date)}\n"
         f"Время: {appointment.start_time.strftime('%H:%M')}\n"
         f"Стоимость: {service_price} BYN\n\n"
+        f"Комментарий: {booking_comment if booking_comment else 'без комментария'}\n\n"
         "Если планы изменятся — напиши заранее\n"
         "До встречи! ✂️",
         reply_markup=menu_keyboard_for_role(user.role if user else "client"),
