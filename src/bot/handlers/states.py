@@ -42,3 +42,9 @@ class AdminScheduleStates(StatesGroup):
     waiting_lunch_end_time = State()
     waiting_confirm = State()
 
+
+class RescheduleStates(StatesGroup):
+    waiting_date = State()
+    waiting_time = State()
+    waiting_confirm = State()
+

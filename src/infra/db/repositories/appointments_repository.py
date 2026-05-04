@@ -374,6 +374,44 @@ class AppointmentsRepository:
             created_at=created_at_dt,
         )
 
+    async def list_for_user(self, user_id: int, limit: int = 20) -> List[AppointmentModel]:
+        def _op() -> List[dict]:
+            client = get_supabase_client()
+            res = (
+                client.table("appointments")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
+                .eq("user_id", user_id)
+                .order("date", desc=True)
+                .order("start_time", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return list(res.data or [])
+
+        rows = await asyncio.to_thread(_op)
+        out: List[AppointmentModel] = []
+        for row in rows:
+            created_at = row.get("created_at")
+            if isinstance(created_at, str):
+                created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            else:
+                created_at_dt = created_at
+            start_t = self._parse_supabase_time(row["start_time"])
+            end_t = self._parse_supabase_time(row["end_time"])
+            out.append(
+                AppointmentModel(
+                    id=int(row["id"]),
+                    user_id=int(row["user_id"]),
+                    date=date.fromisoformat(str(row["date"])),
+                    service_id=int(row["service_id"]),
+                    start_time=start_t,
+                    end_time=end_t,
+                    status=str(row["status"]),
+                    created_at=created_at_dt,
+                )
+            )
+        return out
+
     async def complete_ended_confirmed_appointments(self, now_local: datetime) -> List[int]:
         """
         Автозавершение: если confirmed-запись уже закончилась, ставим status='completed'.

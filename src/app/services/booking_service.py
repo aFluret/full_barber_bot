@@ -75,6 +75,12 @@ class BookingService:
 
         return appt
 
+    async def list_user_appointments(self, user_id: int, limit: int = 20) -> list[AppointmentModel]:
+        return await self._appointments_repo.list_for_user(user_id, limit=limit)
+
+    async def get_appointment_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        return await self._appointments_repo.get_by_id(appointment_id)
+
     @staticmethod
     def _intervals_overlap(a_start: time, a_end: time, b_start: time, b_end: time) -> bool:
         # Half-open intervals: [start, end)
@@ -245,3 +251,58 @@ class BookingService:
         if cancelled is not None:
             await self._reminder_service.cancel_future_reminders_for_appointment(cancelled.id)
         return cancelled
+
+    async def reschedule_appointment(
+        self,
+        *,
+        user_id: int,
+        source_appointment_id: int,
+        target_date: date,
+        time_slot_hhmm: str,
+    ) -> AppointmentModel:
+        """
+        Перенос записи через создание новой записи и отмену старой.
+        Если новый слот в последний момент занят, пытаемся восстановить старую запись.
+        """
+        source = await self._appointments_repo.get_by_id(source_appointment_id)
+        if source is None or source.user_id != user_id or source.status != "confirmed":
+            raise RuntimeError("Активная запись для переноса не найдена")
+
+        service = await self._services_repo.get_by_id(source.service_id)
+        if service is None:
+            raise RuntimeError("Не удалось найти услугу для переноса")
+
+        new_start = datetime.strptime(time_slot_hhmm, "%H:%M").time()
+        if source.date == target_date and source.start_time == new_start:
+            raise RuntimeError("Вы выбрали то же время. Перенос не требуется.")
+
+        source_date = source.date
+        source_start = source.start_time
+        source_end = source.end_time
+        source_service_id = source.service_id
+
+        cancelled = await self.cancel_appointment_by_id(source_appointment_id)
+        if cancelled is None:
+            raise RuntimeError("Не удалось перенести запись: исходная запись неактивна")
+
+        try:
+            return await self.create_appointment(
+                user_id=user_id,
+                target_date=target_date,
+                service_id=service.id,
+                time_slot_hhmm=time_slot_hhmm,
+            )
+        except Exception as create_error:
+            # Best-effort rollback, чтобы не оставить клиента без записи из-за гонки.
+            try:
+                restored = await self._appointments_repo.create_confirmed(
+                    user_id=user_id,
+                    target_date=source_date,
+                    service_id=source_service_id,
+                    start_time=source_start,
+                    end_time=source_end,
+                )
+                await self._reminder_service.schedule_reminders(restored)
+            except Exception:
+                pass
+            raise create_error

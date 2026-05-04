@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.bot.handlers.admin import router as admin_router
 from src.bot.handlers.appointment import router as appointment_router
 from src.bot.handlers.booking import router as booking_router
+from src.bot.handlers.client_support import router as client_support_router
 from src.bot.handlers.start import router as start_router
 from src.app.services.reminder_service import ReminderService
 from src.infra.config.settings import get_settings
@@ -23,6 +24,7 @@ from src.infra.config.settings import get_settings
 def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    dispatcher.include_router(client_support_router)
     dispatcher.include_router(booking_router)
     dispatcher.include_router(appointment_router)
     dispatcher.include_router(admin_router)

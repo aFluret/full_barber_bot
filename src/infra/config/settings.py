@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     app_timezone: str = "Europe/Minsk"
     reminder_24h_offset_minutes: int = 24 * 60
     reminder_2h_offset_minutes: int = 2 * 60
+    contacts_text: str = "Барбершоп: ул. Пример, 1\nТелефон: +375 (00) 000-00-00"
+    admin_contact_text: str = "Напишите администратору: @barber_admin"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

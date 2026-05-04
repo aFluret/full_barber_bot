@@ -14,8 +14,9 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📅 Записаться")],
-            [KeyboardButton(text="📋 Моя запись")],
+            [KeyboardButton(text="📚 Мои записи"), KeyboardButton(text="🔄 Перенести запись")],
             [KeyboardButton(text="❌ Отменить запись")],
+            [KeyboardButton(text="📍 Контакты"), KeyboardButton(text="💬 Связаться с админом")],
         ],
         resize_keyboard=True,
     )
