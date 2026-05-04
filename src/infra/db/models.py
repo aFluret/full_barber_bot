@@ -47,3 +47,7 @@ class AppointmentModel:
     end_time: time
     status: str
     created_at: datetime
+    branch_name: Optional[str] = None
+    master_name: Optional[str] = None
+    master_key: Optional[str] = None
+    comment: Optional[str] = None

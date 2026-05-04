@@ -180,9 +180,19 @@ def _branch_options() -> list[str]:
     return options or ["Основной филиал"]
 
 
-def _master_options() -> list[str]:
-    options = _parse_csv_items(get_settings().masters_csv)
-    return options or ["Илья"]
+def _master_records() -> list[tuple[str, str]]:
+    options = _parse_csv_items(get_settings().masters_csv) or ["Илья"]
+    out: list[tuple[str, str]] = []
+    for idx, name in enumerate(options):
+        out.append((f"m{idx + 1}", name))
+    return out
+
+
+def _master_name_by_key(master_key: str) -> str:
+    for key, name in _master_records():
+        if key == master_key:
+            return name
+    return "Мастер"
 
 
 def _category_back_callback(data: dict) -> str:
@@ -209,8 +219,9 @@ async def _build_booked_days_for_month(
     year: int,
     month: int,
     service_id: int,
+    master_key: str | None = None,
 ) -> list[date]:
-    cache_key = (int(service_id), int(year), int(month))
+    cache_key = (int(service_id), int(year), int(month), str(master_key or "all"))
     now_mono = time.monotonic()
     _cleanup_calendar_cache(now_mono)
     cached = _calendar_month_cache.get(cache_key)
@@ -220,7 +231,10 @@ async def _build_booked_days_for_month(
             return list(cached_days)
 
     out = await booking_service.dates_without_available_slots_in_month(
-        year=year, month=month, service_id=service_id
+        year=year,
+        month=month,
+        service_id=service_id,
+        master_key=master_key if master_key and master_key != "any" else None,
     )
     _calendar_month_cache[cache_key] = (now_mono, list(out))
     return out
@@ -236,10 +250,28 @@ async def _render_calendar(
 ) -> None:
     data = await state.get_data()
     service_id = data.get("booking_service_id")
+    master_key = str(data.get("booking_master_key") or "")
     if not service_id:
         await _safe_edit_booking_message(callback, "Сначала выбери услугу.")
         return
-    booked_days = await _build_booked_days_for_month(year=year, month=month, service_id=int(service_id))
+    if master_key == "any":
+        unavailable_sets: list[set[date]] = []
+        for mk, _ in _master_records():
+            days = await _build_booked_days_for_month(
+                year=year,
+                month=month,
+                service_id=int(service_id),
+                master_key=mk,
+            )
+            unavailable_sets.append(set(days))
+        booked_days = list(set.intersection(*unavailable_sets)) if unavailable_sets else []
+    else:
+        booked_days = await _build_booked_days_for_month(
+            year=year,
+            month=month,
+            service_id=int(service_id),
+            master_key=master_key if master_key else None,
+        )
     await state.update_data(calendar_year=year, calendar_month=month)
     await _safe_edit_booking_message(
         callback,
@@ -327,21 +359,23 @@ async def _show_category_step_callback(callback: CallbackQuery, state: FSMContex
 
 async def _start_booking_flow_message(message: Message, state: FSMContext) -> None:
     branches = _branch_options()
-    masters = _master_options()
+    master_records = _master_records()
     is_barbershop = _mode_is_barbershop()
 
     has_branch_step = is_barbershop and len(branches) > 1
-    has_master_step = is_barbershop and len(masters) > 1
+    has_master_step = is_barbershop and len(master_records) > 1
 
     selected_branch = branches[0]
-    selected_master = masters[0]
+    selected_master_key, selected_master = master_records[0]
     if has_master_step and get_settings().enable_any_master_option:
+        selected_master_key = "any"
         selected_master = "Любой мастер"
 
     await state.update_data(
         booking_has_branch_step=has_branch_step,
         booking_has_master_step=has_master_step,
         booking_branch=selected_branch,
+        booking_master_key=selected_master_key,
         booking_master=selected_master,
     )
 
@@ -350,11 +384,14 @@ async def _start_booking_flow_message(message: Message, state: FSMContext) -> No
         await message.answer("Выбери филиал:", reply_markup=branches_picker_keyboard(branches))
         return
 
-    if has_master_step and len(masters) > 1:
+    if has_master_step and len(master_records) > 1:
         await state.set_state(BookingStates.waiting_master)
         await message.answer(
             "Выбери мастера:",
-            reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
+            reply_markup=masters_picker_keyboard(
+                [name for _, name in master_records],
+                include_any=get_settings().enable_any_master_option,
+            ),
         )
         return
 
@@ -423,19 +460,23 @@ async def choose_branch(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(booking_branch=branches[idx])
     data = await state.get_data()
     has_master_step = bool(data.get("booking_has_master_step"))
-    masters = _master_options()
-    if has_master_step and len(masters) > 1:
+    master_records = _master_records()
+    if has_master_step and len(master_records) > 1:
         await state.set_state(BookingStates.waiting_master)
         await _safe_edit_booking_message(
             callback,
             "Выбери мастера:",
-            reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
+            reply_markup=masters_picker_keyboard(
+                [name for _, name in master_records],
+                include_any=get_settings().enable_any_master_option,
+            ),
         )
     else:
-        default_master = masters[0] if masters else "Любой мастер"
+        default_key, default_master = master_records[0] if master_records else ("any", "Любой мастер")
         if has_master_step and get_settings().enable_any_master_option:
+            default_key = "any"
             default_master = "Любой мастер"
-        await state.update_data(booking_master=default_master)
+        await state.update_data(booking_master_key=default_key, booking_master=default_master)
         await _show_category_step_callback(callback, state)
     await safe_callback_answer(callback)
 
@@ -448,7 +489,7 @@ async def choose_master(callback: CallbackQuery, state: FSMContext) -> None:
 
     payload = callback.data.split(":", 1)[1].strip()
     if payload == "any":
-        await state.update_data(booking_master="Любой мастер")
+        await state.update_data(booking_master_key="any", booking_master="Любой мастер")
         await _show_category_step_callback(callback, state)
         await safe_callback_answer(callback)
         return
@@ -459,12 +500,13 @@ async def choose_master(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
         return
 
-    masters = _master_options()
-    if idx < 0 or idx >= len(masters):
+    master_records = _master_records()
+    if idx < 0 or idx >= len(master_records):
         await safe_callback_answer(callback, "Некорректный мастер.", show_alert=True)
         return
 
-    await state.update_data(booking_master=masters[idx])
+    master_key, master_name = master_records[idx]
+    await state.update_data(booking_master_key=master_key, booking_master=master_name)
     await _show_category_step_callback(callback, state)
     await safe_callback_answer(callback)
 
@@ -540,12 +582,15 @@ async def back_to_master(callback: CallbackQuery, state: FSMContext) -> None:
     if not data.get("booking_has_master_step"):
         await safe_callback_answer(callback)
         return
-    masters = _master_options()
+    master_records = _master_records()
     await state.set_state(BookingStates.waiting_master)
     await _safe_edit_booking_message(
         callback,
         "Выбери мастера:",
-        reply_markup=masters_picker_keyboard(masters, include_any=get_settings().enable_any_master_option),
+        reply_markup=masters_picker_keyboard(
+            [name for _, name in master_records],
+            include_any=get_settings().enable_any_master_option,
+        ),
     )
     await safe_callback_answer(callback)
 
@@ -634,7 +679,26 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_edit_booking_message(callback, "Сначала выбери услугу.")
         return
 
-    slots = await booking_service.list_available_time_slots(target_date, service_id=int(service_id))
+    master_key = str(data.get("booking_master_key") or "")
+    if master_key == "any":
+        slot_map = await booking_service.list_available_slots_for_any_master(
+            target_date=target_date,
+            service_id=int(service_id),
+            masters=_master_records(),
+        )
+        slots = sorted(slot_map.keys())
+        await state.update_data(
+            booking_any_master_slot_map=slot_map,
+            booking_master_resolved_key=None,
+            booking_master_resolved=None,
+        )
+    else:
+        slots = await booking_service.list_available_time_slots(
+            target_date,
+            service_id=int(service_id),
+            master_key=master_key or None,
+        )
+        await state.update_data(booking_any_master_slot_map={})
     if not slots:
         await state.set_state(BookingStates.waiting_date)
         await _render_calendar(
@@ -670,6 +734,31 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
 
+    master_key = str(data.get("booking_master_key") or "")
+    if master_key == "any":
+        slot_map_raw = data.get("booking_any_master_slot_map") or {}
+        slot_map: dict[str, list[str] | tuple[str, str]] = dict(slot_map_raw)
+        resolved = slot_map.get(time_slot)
+        if not resolved:
+            await safe_callback_answer(
+                callback,
+                "Это время уже неактуально для выбранных мастеров. Выбери другое.",
+                show_alert=True,
+            )
+            return
+        resolved_key, resolved_name = str(resolved[0]), str(resolved[1])
+        await state.update_data(
+            booking_master_resolved_key=resolved_key,
+            booking_master_resolved=resolved_name,
+        )
+    else:
+        resolved_key = master_key
+        resolved_name = str(data.get("booking_master") or "—")
+        await state.update_data(
+            booking_master_resolved_key=resolved_key,
+            booking_master_resolved=resolved_name,
+        )
+
     await state.update_data(booking_time=time_slot)
     await state.set_state(BookingStates.waiting_comment)
     await safe_callback_answer(callback)
@@ -699,7 +788,25 @@ async def choose_comment_mode(callback: CallbackQuery, state: FSMContext) -> Non
 
     if action == "back_time":
         await state.set_state(BookingStates.waiting_time)
-        slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
+        master_key = str(data.get("booking_master_key") or "")
+        if master_key == "any":
+            slot_map = await booking_service.list_available_slots_for_any_master(
+                target_date=booking_date,
+                service_id=int(service_id),
+                masters=_master_records(),
+            )
+            slots = sorted(slot_map.keys())
+            await state.update_data(
+                booking_any_master_slot_map=slot_map,
+                booking_master_resolved_key=None,
+                booking_master_resolved=None,
+            )
+        else:
+            slots = await booking_service.list_available_time_slots(
+                booking_date,
+                service_id=int(service_id),
+                master_key=master_key or None,
+            )
         await safe_callback_answer(callback)
         await _safe_edit_booking_message(
             callback,
@@ -725,7 +832,7 @@ async def choose_comment_mode(callback: CallbackQuery, state: FSMContext) -> Non
     await state.update_data(booking_comment="")
     await state.set_state(BookingStates.waiting_confirm)
     branch_name = str(data.get("booking_branch") or "—")
-    master_name = str(data.get("booking_master") or "—")
+    master_name = str(data.get("booking_master_resolved") or data.get("booking_master") or "—")
     confirm_text = await _build_booking_confirm_text(
         booking_date=booking_date,
         booking_time=str(booking_time),
@@ -762,7 +869,7 @@ async def handle_booking_comment(message: Message, state: FSMContext) -> None:
     await state.update_data(booking_comment=raw_comment)
     await state.set_state(BookingStates.waiting_confirm)
     branch_name = str(data.get("booking_branch") or "—")
-    master_name = str(data.get("booking_master") or "—")
+    master_name = str(data.get("booking_master_resolved") or data.get("booking_master") or "—")
     confirm_text = await _build_booking_confirm_text(
         booking_date=booking_date,
         booking_time=str(booking_time),
@@ -784,7 +891,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     service_id = data.get("booking_service_id")
     booking_comment = _normalize_comment(data.get("booking_comment"))
     booking_branch = str(data.get("booking_branch") or "—")
-    booking_master = str(data.get("booking_master") or "—")
+    booking_master = str(data.get("booking_master_resolved") or data.get("booking_master") or "—")
+    booking_master_key = str(data.get("booking_master_resolved_key") or data.get("booking_master_key") or "")
     if not booking_date_iso:
         await safe_callback_answer(callback, "Сначала выбери дату.", show_alert=True)
         return
@@ -821,6 +929,10 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             target_date=booking_date,
             service_id=int(service_id),
             time_slot_hhmm=str(booking_time),
+            branch_name=booking_branch,
+            master_name=booking_master,
+            master_key=(booking_master_key if booking_master_key and booking_master_key != "any" else None),
+            comment=booking_comment or None,
         )
     except BookingAlreadyExistsError as e:
         await _safe_edit_booking_message(callback, str(e))
@@ -831,7 +943,24 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         if not service_id:
             await safe_callback_answer(callback, "Сначала выбери услугу.", show_alert=True)
             return
-        slots = await booking_service.list_available_time_slots(booking_date, service_id=int(service_id))
+        if booking_master_key == "any":
+            slot_map = await booking_service.list_available_slots_for_any_master(
+                target_date=booking_date,
+                service_id=int(service_id),
+                masters=_master_records(),
+            )
+            slots = sorted(slot_map.keys())
+            await state.update_data(
+                booking_any_master_slot_map=slot_map,
+                booking_master_resolved_key=None,
+                booking_master_resolved=None,
+            )
+        else:
+            slots = await booking_service.list_available_time_slots(
+                booking_date,
+                service_id=int(service_id),
+                master_key=booking_master_key or None,
+            )
         if slots:
             await _safe_edit_booking_message(
                 callback,

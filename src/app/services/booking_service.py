@@ -86,7 +86,12 @@ class BookingService:
         # Half-open intervals: [start, end)
         return a_start < b_end and a_end > b_start
 
-    async def list_available_time_slots(self, target_date: date, service_id: int) -> list[str]:
+    async def list_available_time_slots(
+        self,
+        target_date: date,
+        service_id: int,
+        master_key: Optional[str] = None,
+    ) -> list[str]:
         service = await self._services_repo.get_by_id(service_id)
         if service is None:
             return []
@@ -95,7 +100,14 @@ class BookingService:
             target_date,
             duration_minutes=service.duration_minutes,
         )
-        occupied = await self._appointments_repo.list_confirmed_intervals(target_date)
+        try:
+            occupied = await self._appointments_repo.list_confirmed_intervals(
+                target_date,
+                master_key=master_key,
+            )
+        except TypeError:
+            # Совместимость с тестовыми даблами/старыми реализациями репозитория.
+            occupied = await self._appointments_repo.list_confirmed_intervals(target_date)
 
         out: list[str] = []
         for slot_hhmm in candidates:
@@ -117,11 +129,34 @@ class BookingService:
 
         return out
 
+    async def list_available_slots_for_any_master(
+        self,
+        target_date: date,
+        service_id: int,
+        masters: list[tuple[str, str]],
+    ) -> dict[str, tuple[str, str]]:
+        """
+        Возвращает карту slot -> (master_key, master_name) для режима "любой мастер".
+        Если слот доступен у нескольких мастеров, выбирается первый по порядку в списке masters.
+        """
+        slot_map: dict[str, tuple[str, str]] = {}
+        for master_key, master_name in masters:
+            slots = await self.list_available_time_slots(
+                target_date=target_date,
+                service_id=service_id,
+                master_key=master_key,
+            )
+            for slot in slots:
+                if slot not in slot_map:
+                    slot_map[slot] = (master_key, master_name)
+        return slot_map
+
     async def dates_without_available_slots_in_month(
         self,
         year: int,
         month: int,
         service_id: int,
+        master_key: Optional[str] = None,
     ) -> list[date]:
         """
         Дни месяца, в которые для выбранной услуги нет ни одного свободного слота
@@ -135,7 +170,18 @@ class BookingService:
         service = await self._services_repo.get_by_id(service_id)
         first_day = date(year, month, 1)
         last_day = date(year, month, calendar.monthrange(year, month)[1])
-        intervals_by_date = await self._appointments_repo.list_confirmed_intervals_range(first_day, last_day)
+        try:
+            intervals_by_date = await self._appointments_repo.list_confirmed_intervals_range(
+                first_day,
+                last_day,
+                master_key=master_key,
+            )
+        except TypeError:
+            # Совместимость с тестовыми даблами/старыми реализациями репозитория.
+            intervals_by_date = await self._appointments_repo.list_confirmed_intervals_range(
+                first_day,
+                last_day,
+            )
 
         out: list[date] = []
         cur = first_day
@@ -203,6 +249,10 @@ class BookingService:
         target_date: date,
         service_id: int,
         time_slot_hhmm: str,
+        branch_name: Optional[str] = None,
+        master_name: Optional[str] = None,
+        master_key: Optional[str] = None,
+        comment: Optional[str] = None,
     ) -> AppointmentModel:
         existing = await self.get_active_appointment(user_id)
         if existing is not None:
@@ -233,6 +283,10 @@ class BookingService:
                 service_id=service_id,
                 start_time=start_t,
                 end_time=end_t,
+                branch_name=branch_name,
+                master_name=master_name,
+                master_key=master_key,
+                comment=comment,
             )
             await self._reminder_service.schedule_reminders(appointment)
             return appointment
@@ -291,6 +345,10 @@ class BookingService:
                 target_date=target_date,
                 service_id=service.id,
                 time_slot_hhmm=time_slot_hhmm,
+                branch_name=source.branch_name,
+                master_name=source.master_name,
+                master_key=source.master_key,
+                comment=source.comment,
             )
         except Exception as create_error:
             # Best-effort rollback, чтобы не оставить клиента без записи из-за гонки.
@@ -301,6 +359,10 @@ class BookingService:
                     service_id=source_service_id,
                     start_time=source_start,
                     end_time=source_end,
+                    branch_name=source.branch_name,
+                    master_name=source.master_name,
+                    master_key=source.master_key,
+                    comment=source.comment,
                 )
                 await self._reminder_service.schedule_reminders(restored)
             except Exception:

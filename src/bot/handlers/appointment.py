@@ -121,8 +121,12 @@ async def my_appointments(message: Message) -> None:
         for idx, appt in enumerate(active, start=1):
             svc = services.get(appt.service_id)
             service_name = svc.name if svc else f"Услуга #{appt.service_id}"
+            branch_name = appt.branch_name or "—"
+            master_name = appt.master_name or "—"
             lines.append(
                 f"{idx}. {_human_booking_date(appt.date)}, {appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}\n"
+                f"   Филиал: {branch_name}\n"
+                f"   Мастер: {master_name}\n"
                 f"   Услуга: {service_name}\n"
                 f"   Статус: {_status_label(appt.status, appt.date, appt.end_time)}"
             )
@@ -134,8 +138,12 @@ async def my_appointments(message: Message) -> None:
         for idx, appt in enumerate(history[:5], start=1):
             svc = services.get(appt.service_id)
             service_name = svc.name if svc else f"Услуга #{appt.service_id}"
+            branch_name = appt.branch_name or "—"
+            master_name = appt.master_name or "—"
             lines.append(
                 f"{idx}. {appt.date.strftime('%d.%m.%Y')} {appt.start_time.strftime('%H:%M')}\n"
+                f"   Филиал: {branch_name}\n"
+                f"   Мастер: {master_name}\n"
                 f"   Услуга: {service_name}\n"
                 f"   Статус: {_status_label(appt.status, appt.date, appt.end_time)}"
             )

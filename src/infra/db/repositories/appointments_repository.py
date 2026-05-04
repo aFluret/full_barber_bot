@@ -23,6 +23,12 @@ class SlotUnavailableError(Exception):
 
 
 class AppointmentsRepository:
+    BASE_SELECT = "id,user_id,date,service_id,start_time,end_time,status,created_at"
+    EXT_SELECT = (
+        "id,user_id,date,service_id,start_time,end_time,status,created_at,"
+        "branch_name,master_name,master_key,comment"
+    )
+
     @staticmethod
     def _parse_supabase_time(raw: object) -> time:
         """
@@ -46,32 +52,14 @@ class AppointmentsRepository:
         # Half-open intervals: [start, end). Границы не считаем пересечением.
         return a_start < b_end and a_end > b_start
 
-    async def get_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
-        def _op() -> Optional[dict]:
-            client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
-                .eq("user_id", user_id)
-                .eq("status", "confirmed")
-                .limit(1)
-                .execute()
-            )
-            return res.data[0] if res.data else None
-
-        row = await asyncio.to_thread(_op)
-        if not row:
-            return None
-
+    def _to_model(self, row: dict) -> AppointmentModel:
         created_at = row.get("created_at")
         if isinstance(created_at, str):
             created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         else:
             created_at_dt = created_at
-
         start_t = self._parse_supabase_time(row["start_time"])
         end_t = self._parse_supabase_time(row["end_time"])
-
         return AppointmentModel(
             id=int(row["id"]),
             user_id=int(row["user_id"]),
@@ -81,7 +69,39 @@ class AppointmentsRepository:
             end_time=end_t,
             status=str(row["status"]),
             created_at=created_at_dt,
+            branch_name=(str(row.get("branch_name")) if row.get("branch_name") is not None else None),
+            master_name=(str(row.get("master_name")) if row.get("master_name") is not None else None),
+            master_key=(str(row.get("master_key")) if row.get("master_key") is not None else None),
+            comment=(str(row.get("comment")) if row.get("comment") is not None else None),
         )
+
+    async def get_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
+        def _op() -> Optional[dict]:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .eq("user_id", user_id)
+                    .eq("status", "confirmed")
+                    .limit(1)
+                    .execute()
+                )
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select(self.BASE_SELECT)
+                    .eq("user_id", user_id)
+                    .eq("status", "confirmed")
+                    .limit(1)
+                    .execute()
+                )
+            return res.data[0] if res.data else None
+
+        row = await asyncio.to_thread(_op)
+        if not row:
+            return None
+        return self._to_model(row)
 
     async def cancel_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
         # Изменение статуса делает слот "свободным" для логики выборки занятых.
@@ -119,16 +139,32 @@ class AppointmentsRepository:
         await asyncio.to_thread(_op)
         return existing
 
-    async def list_confirmed_intervals(self, target_date: date) -> List[Tuple[time, time]]:
+    async def list_confirmed_intervals(
+        self,
+        target_date: date,
+        master_key: Optional[str] = None,
+    ) -> List[Tuple[time, time]]:
         def _op() -> List[Tuple[time, time]]:
             client = get_supabase_client()
-            res = (
+            query = (
                 client.table("appointments")
                 .select("start_time,end_time")
                 .eq("date", target_date.isoformat())
                 .eq("status", "confirmed")
-                .execute()
             )
+            try:
+                if master_key:
+                    query = query.eq("master_key", master_key)
+                res = query.execute()
+            except Exception:
+                # fallback для схемы без master_key
+                res = (
+                    client.table("appointments")
+                    .select("start_time,end_time")
+                    .eq("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .execute()
+                )
             out: List[Tuple[time, time]] = []
             for row in res.data or []:
                 out.append(
@@ -145,6 +181,7 @@ class AppointmentsRepository:
         self,
         start_date: date,
         end_date: date,
+        master_key: Optional[str] = None,
     ) -> Dict[date, List[Tuple[time, time]]]:
         """
         Все подтверждённые интервалы за диапазон дат [start_date, end_date] одним запросом.
@@ -152,14 +189,26 @@ class AppointmentsRepository:
 
         def _op() -> Dict[date, List[Tuple[time, time]]]:
             client = get_supabase_client()
-            res = (
+            query = (
                 client.table("appointments")
                 .select("date,start_time,end_time")
                 .eq("status", "confirmed")
                 .gte("date", start_date.isoformat())
                 .lte("date", end_date.isoformat())
-                .execute()
             )
+            try:
+                if master_key:
+                    query = query.eq("master_key", master_key)
+                res = query.execute()
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select("date,start_time,end_time")
+                    .eq("status", "confirmed")
+                    .gte("date", start_date.isoformat())
+                    .lte("date", end_date.isoformat())
+                    .execute()
+                )
             out: Dict[date, List[Tuple[time, time]]] = defaultdict(list)
             for row in res.data or []:
                 raw_d = row.get("date")
@@ -183,10 +232,14 @@ class AppointmentsRepository:
         service_id: int,
         start_time: time,
         end_time: time,
+        branch_name: Optional[str] = None,
+        master_name: Optional[str] = None,
+        master_key: Optional[str] = None,
+        comment: Optional[str] = None,
     ) -> AppointmentModel:
         # Приложение делает fast-check по confirmed interval'ам,
         # а БД обеспечивает основную защиту от гонок.
-        occupied = await self.list_confirmed_intervals(target_date)
+        occupied = await self.list_confirmed_intervals(target_date, master_key=master_key)
         for o_start, o_end in occupied:
             if self._intervals_overlap(start_time, end_time, o_start, o_end):
                 raise SlotUnavailableError("Интервал пересекается с существующей записью")
@@ -201,14 +254,28 @@ class AppointmentsRepository:
                 "end_time": self._time_to_supabase(end_time),
                 "status": "confirmed",
             }
+            payload_ext = dict(payload)
+            payload_ext.update(
+                {
+                    "branch_name": branch_name,
+                    "master_name": master_name,
+                    "master_key": master_key,
+                    "comment": comment,
+                }
+            )
 
             # В supabase-py 2.x нельзя использовать `.select()` после `.insert()`.
             # Поэтому: вставляем, затем отдельным запросом забираем запись того же слота.
-            client.table("appointments").insert(payload).execute()
+            try:
+                client.table("appointments").insert(payload_ext).execute()
+                use_ext = True
+            except Exception:
+                client.table("appointments").insert(payload).execute()
+                use_ext = False
 
-            res2 = (
+            query = (
                 client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
+                .select(self.EXT_SELECT if use_ext else self.BASE_SELECT)
                 .eq("user_id", user_id)
                 .eq("date", target_date.isoformat())
                 .eq("service_id", service_id)
@@ -217,8 +284,10 @@ class AppointmentsRepository:
                 .eq("status", "confirmed")
                 .order("created_at", desc=True)
                 .limit(1)
-                .execute()
             )
+            if use_ext and master_key:
+                query = query.eq("master_key", master_key)
+            res2 = query.execute()
             if not res2.data:
                 raise RuntimeError("Не удалось прочитать созданную запись appointments")
             return res2.data[0]
@@ -237,180 +306,117 @@ class AppointmentsRepository:
                 raise SlotUnavailableError("Интервал пересекается с существующей записью") from e
             raise
 
-        created_at = row.get("created_at")
-        if isinstance(created_at, str):
-            created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        else:
-            created_at_dt = created_at
-
-        start_t = self._parse_supabase_time(row["start_time"])
-        end_t = self._parse_supabase_time(row["end_time"])
-
-        return AppointmentModel(
-            id=int(row["id"]),
-            user_id=int(row["user_id"]),
-            date=date.fromisoformat(str(row["date"])),
-            service_id=int(row["service_id"]),
-            start_time=start_t,
-            end_time=end_t,
-            status=str(row["status"]),
-            created_at=created_at_dt,
-        )
+        return self._to_model(row)
 
     async def list_by_date_from_today(self, target_date: date) -> List[AppointmentModel]:
         # used for /today and /tomorrow: exact date filter
         def _op() -> List[dict]:
             client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
-                .eq("date", target_date.isoformat())
-                .eq("status", "confirmed")
-                .order("start_time")
-                .execute()
-            )
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .eq("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .order("start_time")
+                    .execute()
+                )
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select(self.BASE_SELECT)
+                    .eq("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .order("start_time")
+                    .execute()
+                )
             return list(res.data or [])
 
         rows = await asyncio.to_thread(_op)
-        out: List[AppointmentModel] = []
-        for row in rows:
-            created_at = row.get("created_at")
-            if isinstance(created_at, str):
-                created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            else:
-                created_at_dt = created_at
-
-            start_t = self._parse_supabase_time(row["start_time"])
-            end_t = self._parse_supabase_time(row["end_time"])
-
-            out.append(
-                AppointmentModel(
-                    id=int(row["id"]),
-                    user_id=int(row["user_id"]),
-                    date=date.fromisoformat(str(row["date"])),
-                    service_id=int(row["service_id"]),
-                    start_time=start_t,
-                    end_time=end_t,
-                    status=str(row["status"]),
-                    created_at=created_at_dt,
-                )
-            )
-        return out
+        return [self._to_model(row) for row in rows]
 
     async def list_confirmed_from_date(self, target_date: date) -> List[AppointmentModel]:
         # используется для команды /all (все будущие записи)
         def _op() -> List[dict]:
             client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
-                .gte("date", target_date.isoformat())
-                .eq("status", "confirmed")
-                .order("date")
-                .order("start_time")
-                .execute()
-            )
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .gte("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .order("date")
+                    .order("start_time")
+                    .execute()
+                )
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select(self.BASE_SELECT)
+                    .gte("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .order("date")
+                    .order("start_time")
+                    .execute()
+                )
             return list(res.data or [])
 
         rows = await asyncio.to_thread(_op)
-        out: List[AppointmentModel] = []
-        for row in rows:
-            created_at = row.get("created_at")
-            if isinstance(created_at, str):
-                created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            else:
-                created_at_dt = created_at
-
-            start_t = self._parse_supabase_time(row["start_time"])
-            end_t = self._parse_supabase_time(row["end_time"])
-
-            out.append(
-                AppointmentModel(
-                    id=int(row["id"]),
-                    user_id=int(row["user_id"]),
-                    date=date.fromisoformat(str(row["date"])),
-                    service_id=int(row["service_id"]),
-                    start_time=start_t,
-                    end_time=end_t,
-                    status=str(row["status"]),
-                    created_at=created_at_dt,
-                )
-            )
-        return out
+        return [self._to_model(row) for row in rows]
 
     async def get_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
         def _op() -> Optional[dict]:
             client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
-                .eq("id", appointment_id)
-                .limit(1)
-                .execute()
-            )
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .eq("id", appointment_id)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select(self.BASE_SELECT)
+                    .eq("id", appointment_id)
+                    .limit(1)
+                    .execute()
+                )
             return res.data[0] if res.data else None
 
         row = await asyncio.to_thread(_op)
         if not row:
             return None
-
-        created_at = row.get("created_at")
-        if isinstance(created_at, str):
-            created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        else:
-            created_at_dt = created_at
-
-        start_t = self._parse_supabase_time(row["start_time"])
-        end_t = self._parse_supabase_time(row["end_time"])
-
-        return AppointmentModel(
-            id=int(row["id"]),
-            user_id=int(row["user_id"]),
-            date=date.fromisoformat(str(row["date"])),
-            service_id=int(row["service_id"]),
-            start_time=start_t,
-            end_time=end_t,
-            status=str(row["status"]),
-            created_at=created_at_dt,
-        )
+        return self._to_model(row)
 
     async def list_for_user(self, user_id: int, limit: int = 20) -> List[AppointmentModel]:
         def _op() -> List[dict]:
             client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
-                .eq("user_id", user_id)
-                .order("date", desc=True)
-                .order("start_time", desc=True)
-                .limit(limit)
-                .execute()
-            )
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .eq("user_id", user_id)
+                    .order("date", desc=True)
+                    .order("start_time", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+            except Exception:
+                res = (
+                    client.table("appointments")
+                    .select(self.BASE_SELECT)
+                    .eq("user_id", user_id)
+                    .order("date", desc=True)
+                    .order("start_time", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
             return list(res.data or [])
 
         rows = await asyncio.to_thread(_op)
-        out: List[AppointmentModel] = []
-        for row in rows:
-            created_at = row.get("created_at")
-            if isinstance(created_at, str):
-                created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            else:
-                created_at_dt = created_at
-            start_t = self._parse_supabase_time(row["start_time"])
-            end_t = self._parse_supabase_time(row["end_time"])
-            out.append(
-                AppointmentModel(
-                    id=int(row["id"]),
-                    user_id=int(row["user_id"]),
-                    date=date.fromisoformat(str(row["date"])),
-                    service_id=int(row["service_id"]),
-                    start_time=start_t,
-                    end_time=end_t,
-                    status=str(row["status"]),
-                    created_at=created_at_dt,
-                )
-            )
-        return out
+        return [self._to_model(row) for row in rows]
 
     async def complete_ended_confirmed_appointments(self, now_local: datetime) -> List[int]:
         """
