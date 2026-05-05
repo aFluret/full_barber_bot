@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 
 class ReminderService:
     @staticmethod
+    def _safe_format(template: str, values: dict[str, str]) -> str:
+        text = (template or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        for key, value in values.items():
+            text = text.replace("{" + key + "}", str(value))
+        return text
+
+    @staticmethod
     def _resolve_timezone(raw_tz: str):
         value = (raw_tz or "").strip()
         if not value:
@@ -106,6 +113,7 @@ class ReminderService:
             reminder_job_id = int(job["id"])
             appointment_id = int(job["appointment_id"])
             user_id = int(job["user_id"])
+            remind_type = str(job.get("remind_type") or "")
 
             appointment = await self._appointments_repo.get_by_id(appointment_id)
             if appointment is None or appointment.status != "confirmed":
@@ -113,9 +121,20 @@ class ReminderService:
                 await self._jobs_repo.mark_sent(reminder_job_id)
                 continue
 
-            text = (
-                f"Напоминание: вы записаны на {appointment.date.strftime('%d.%m.%Y')} "
-                f"в {appointment.start_time.strftime('%H:%M')}."
+            settings = get_settings()
+            template = (
+                settings.reminder_text_24h
+                if remind_type == "24h"
+                else settings.reminder_text_2h
+            )
+            text = self._safe_format(
+                template,
+                {
+                    "date": appointment.date.strftime("%d.%m.%Y"),
+                    "time": appointment.start_time.strftime("%H:%M"),
+                    "branch": appointment.branch_name or "—",
+                    "master": appointment.master_name or "—",
+                },
             )
 
             try:

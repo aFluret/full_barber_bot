@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -146,6 +147,13 @@ def _normalize_comment(raw: str | None) -> str:
     return value[:300]
 
 
+def _render_template(template: str, values: dict[str, str]) -> str:
+    text = (template or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", html.escape(str(value)))
+    return text
+
+
 def _format_duration(minutes: int) -> str:
     if minutes < 60:
         return f"{minutes} мин"
@@ -181,6 +189,27 @@ def _resolve_master_notify_chat_id(master_key: str | None) -> int | None:
         return None
     mapping = _parse_master_notify_map(get_settings().master_telegram_map)
     return mapping.get(key)
+
+
+def _parse_admin_user_ids(raw: str) -> list[int]:
+    out: list[int] = []
+    for chunk in (raw or "").split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        try:
+            out.append(int(value))
+        except ValueError:
+            continue
+    return out
+
+
+async def _admin_recipient_ids() -> list[int]:
+    ids = set(_parse_admin_user_ids(get_settings().admin_user_ids))
+    admins = await users_repo.list_admins()
+    for admin in admins:
+        ids.add(int(admin.user_id))
+    return sorted(ids)
 
 
 async def _build_booking_confirm_text(
@@ -1192,60 +1221,63 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     service_duration = service.duration_minutes if service is not None else 0
 
     # Уведомляем администраторов сразу после успешного подтверждения записи.
-    admins = await users_repo.list_admins()
-    if admins and user is not None:
-        service_text = (
-            f"{service.name} — {service.price_byn} BYN" if service is not None else f"Услуга #{appointment.service_id}"
-        )
-        comment_text = booking_comment if booking_comment else "без комментария"
-        notify_text = (
-            "🔥 Новая запись\n\n"
-            f"Клиент: {user.name}\n"
-            f"Филиал: {booking_branch}\n"
-            f"Мастер: {booking_master}\n"
-            f"Время: {appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}\n"
-            f"Услуга: {service_text}\n"
-            f"Номер телефона: {user.phone}\n"
-            f"Комментарий: {comment_text}"
+    admin_ids = await _admin_recipient_ids()
+    if admin_ids and user is not None:
+        notify_text = _render_template(
+            get_settings().notify_admin_created_text,
+            {
+                "client": user.name,
+                "branch": booking_branch,
+                "master": booking_master,
+                "date": _human_booking_date(appointment.date),
+                "time": f"{appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}",
+                "service": f"{service_name} — {service_price} BYN",
+                "phone": user.phone,
+                "comment": booking_comment if booking_comment else "без комментария",
+            },
         )
         await asyncio.gather(
             *[
-                callback.bot.send_message(chat_id=admin.user_id, text=notify_text)
-                for admin in admins
+                callback.bot.send_message(chat_id=admin_id, text=notify_text)
+                for admin_id in admin_ids
             ],
             return_exceptions=True,
         )
 
     master_chat_id = _resolve_master_notify_chat_id(booking_master_key)
     if master_chat_id:
-        master_comment_text = booking_comment if booking_comment else "без комментария"
-        master_notify_text = (
-            "🧾 Новая запись к вам\n\n"
-            f"Клиент: {user_name}\n"
-            f"Телефон: {user.phone if user else 'не указан'}\n"
-            f"Филиал: {booking_branch}\n"
-            f"Услуга: {service_name}\n"
-            f"Дата: {_human_booking_date(appointment.date)}\n"
-            f"Время: {appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}\n"
-            f"Комментарий: {master_comment_text}"
+        master_notify_text = _render_template(
+            get_settings().notify_master_created_text,
+            {
+                "client": user_name,
+                "phone": user.phone if user else "не указан",
+                "branch": booking_branch,
+                "service": service_name,
+                "date": _human_booking_date(appointment.date),
+                "time": f"{appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}",
+                "comment": booking_comment if booking_comment else "без комментария",
+            },
         )
         try:
             await callback.bot.send_message(chat_id=master_chat_id, text=master_notify_text)
         except Exception:
             pass
 
+    client_text = _render_template(
+        get_settings().notify_client_created_text,
+        {
+            "branch": booking_branch,
+            "master": booking_master,
+            "service": service_name,
+            "duration": _format_duration(service_duration) if service_duration else "уточняется",
+            "date": _human_booking_date(appointment.date),
+            "time": appointment.start_time.strftime("%H:%M"),
+            "price": f"{service_price} BYN",
+            "comment": booking_comment if booking_comment else "без комментария",
+        },
+    )
     await callback.message.answer(
-        "Готово! Ты записан ✅\n\n"
-        f"Филиал: {booking_branch}\n"
-        f"Мастер: {booking_master}\n"
-        f"Услуга: {service_name}\n"
-        f"Длительность: {_format_duration(service_duration) if service_duration else 'уточняется'}\n"
-        f"Дата: {_human_booking_date(appointment.date)}\n"
-        f"Время: {appointment.start_time.strftime('%H:%M')}\n"
-        f"Стоимость: {service_price} BYN\n\n"
-        f"Комментарий: {booking_comment if booking_comment else 'без комментария'}\n\n"
-        "Если планы изменятся — напиши заранее\n"
-        "До встречи! ✂️",
+        client_text,
         reply_markup=menu_keyboard_for_role(user.role if user else "client"),
     )
     await safe_callback_answer(callback)

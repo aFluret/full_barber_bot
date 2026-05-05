@@ -116,13 +116,14 @@ async def _render_day_report(target_date: date) -> str:
         service_price = service.price_byn if service is not None else 0
         total_sum += service_price
         lines.append(
-            f"{idx}. {appt.start_time.strftime('%H:%M')} — {user.name}\n"
+            f"{idx}. #{appt.id} {appt.start_time.strftime('%H:%M')} — {user.name}\n"
             f"   {service_name} — {service_price} BYN\n"
             f"   📞 {user.phone}\n"
         )
         idx += 1
 
     lines.append(f"━━━━━━━━━━━━━━━━━━\nВсего: {idx - 1} записи | Сумма: {total_sum} BYN")
+    lines.append("No-show: /no_show &lt;appointment_id&gt;")
     return "\n".join(lines)
 
 
@@ -256,11 +257,12 @@ async def all_future_appointments(message: Message, state: FSMContext) -> None:
             current_day = appt.date
             lines.append(f"\n{_weekday_ru(appt.date)}, {appt.date.strftime('%d.%m')}:")
         lines.append(
-            f"  {appt.start_time.strftime('%H:%M')} — {user.name} — {service_name} — {service_price} BYN\n"
+            f"  #{appt.id} {appt.start_time.strftime('%H:%M')} — {user.name} — {service_name} — {service_price} BYN\n"
             f"  📞 {user.phone}"
         )
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━━\nВсего: {len(appts)} записи | Сумма: {total_sum} BYN")
+    lines.append("No-show: /no_show &lt;appointment_id&gt;")
     await message.answer("\n".join(lines))
 
 
@@ -1022,6 +1024,7 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "/today — записи на сегодня\n"
         "/tomorrow — записи на завтра\n"
         "/all — все будущие записи\n\n"
+        "/no_show &lt;appointment_id&gt; — отметить запись как no-show\n\n"
         "📊 Отчёты:\n"
         "/stats — базовая статистика (записи/выручка)\n"
         "/master_load — загрузка мастеров\n\n"

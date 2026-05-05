@@ -340,6 +340,12 @@ class BookingService:
             await self._reminder_service.cancel_future_reminders_for_appointment(cancelled.id)
         return cancelled
 
+    async def mark_no_show_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        updated = await self._appointments_repo.mark_no_show_by_id(appointment_id)
+        if updated is not None:
+            await self._reminder_service.cancel_future_reminders_for_appointment(updated.id)
+        return updated
+
     async def reschedule_appointment(
         self,
         *,

@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import html
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -24,10 +27,12 @@ from src.bot.keyboards.calendar import RU_MONTHS_NOM, WEEKDAY_LABELS, generate_c
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
 from src.infra.config.settings import get_settings
 from src.infra.db.repositories.services_repository import ServicesRepository
+from src.infra.db.repositories.users_repository import UsersRepository
 
 router = Router()
 booking_service = BookingService()
 services_repo = ServicesRepository()
+users_repo = UsersRepository()
 RU_WEEKDAY_FULL = {
     0: "понедельник",
     1: "вторник",
@@ -53,6 +58,71 @@ RU_MONTHS_GEN = {
 }
 
 
+def _render_template(template: str, values: dict[str, str]) -> str:
+    text = (template or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", html.escape(str(value)))
+    return text
+
+
+def _parse_master_notify_map(raw: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for chunk in (raw or "").split(","):
+        pair = chunk.strip()
+        if not pair:
+            continue
+        sep = ":" if ":" in pair else ("=" if "=" in pair else None)
+        if sep is None:
+            continue
+        key_raw, user_id_raw = pair.split(sep, 1)
+        key = key_raw.strip()
+        if not key:
+            continue
+        try:
+            out[key] = int(user_id_raw.strip())
+        except ValueError:
+            continue
+    return out
+
+
+def _resolve_master_notify_chat_id(master_key: str | None) -> int | None:
+    key = (master_key or "").strip()
+    if not key:
+        return None
+    return _parse_master_notify_map(get_settings().master_telegram_map).get(key)
+
+
+def _parse_admin_user_ids(raw: str) -> list[int]:
+    out: list[int] = []
+    for chunk in (raw or "").split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        try:
+            out.append(int(value))
+        except ValueError:
+            continue
+    return out
+
+
+async def _admin_recipient_ids() -> list[int]:
+    ids = set(_parse_admin_user_ids(get_settings().admin_user_ids))
+    admins = await users_repo.list_admins()
+    for admin in admins:
+        ids.add(int(admin.user_id))
+    return sorted(ids)
+
+
+async def _notify_admins(bot, text: str) -> None:
+    recipient_ids = await _admin_recipient_ids()
+    if not recipient_ids:
+        return
+    await asyncio.gather(
+        *[bot.send_message(chat_id=user_id, text=text) for user_id in recipient_ids],
+        return_exceptions=True,
+    )
+
+
 def _human_booking_date(d: date) -> str:
     today = date.today()
     if d == today:
@@ -72,6 +142,8 @@ def _status_label(status: str, target_date: date, end_time) -> str:
         return "отменена"
     if status == "completed":
         return "завершена"
+    if status == "no_show":
+        return "no-show"
     if status == "confirmed":
         end_dt_local = datetime.combine(target_date, end_time, tzinfo=tz)
         if end_dt_local <= now_local:
@@ -241,13 +313,43 @@ async def cancel_appointment_confirm(callback: CallbackQuery, state: FSMContext)
 
     user = await booking_service.get_user(callback.from_user.id)
     role = user.role if user else "client"
+    service = await services_repo.get_by_id(appt.service_id)
+    service_name = service.name if service else f"Услуга #{appt.service_id}"
+    admin_text = _render_template(
+        get_settings().notify_admin_cancelled_text,
+        {
+            "client": user.name if user else "Клиент",
+            "branch": appt.branch_name or "—",
+            "master": appt.master_name or "—",
+            "service": service_name,
+            "date": _human_booking_date(appt.date),
+            "time": f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
+        },
+    )
+    await _notify_admins(callback.bot, admin_text)
+    master_chat_id = _resolve_master_notify_chat_id(appt.master_key)
+    if master_chat_id:
+        master_text = _render_template(
+            get_settings().notify_master_cancelled_text,
+            {
+                "client": user.name if user else "Клиент",
+                "service": service_name,
+                "date": _human_booking_date(appt.date),
+                "time": f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
+            },
+        )
+        try:
+            await callback.bot.send_message(chat_id=master_chat_id, text=master_text)
+        except Exception:
+            pass
+
     await safe_callback_answer(callback)
     try:
-        await callback.message.edit_text("Запись отменена ✅")
+        await callback.message.edit_text(_render_template(get_settings().notify_client_cancelled_text, {}))
     except TelegramBadRequest:
-        await callback.message.answer("Запись отменена ✅")
+        await callback.message.answer(_render_template(get_settings().notify_client_cancelled_text, {}))
     await callback.message.answer(
-        "Можешь записаться заново на любую услугу.",
+        "Выбери действие в меню ниже.",
         reply_markup=menu_keyboard_for_role(role),
     )
 
@@ -586,6 +688,7 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
     source_id = data.get("reschedule_appointment_id")
     service_id = data.get("reschedule_service_id")
     master_key = str(data.get("reschedule_master_key") or "") or None
+    source = await booking_service.get_appointment_by_id(int(source_id)) if source_id else None
     if not iso or not source_id or not service_id:
         await safe_callback_answer(callback, "Недостаточно данных для переноса", show_alert=True)
         return
@@ -634,15 +737,111 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
     role = user.role if user else "client"
     service = await services_repo.get_by_id(new_appointment.service_id)
     service_name = service.name if service else f"Услуга #{new_appointment.service_id}"
+    old_date_text = _human_booking_date(source.date) if source is not None else "—"
+    old_time_text = (
+        f"{source.start_time.strftime('%H:%M')}–{source.end_time.strftime('%H:%M')}"
+        if source is not None
+        else "—"
+    )
+    new_date_text = _human_booking_date(new_appointment.date)
+    new_time_text = f"{new_appointment.start_time.strftime('%H:%M')}–{new_appointment.end_time.strftime('%H:%M')}"
+    admin_text = _render_template(
+        get_settings().notify_admin_rescheduled_text,
+        {
+            "client": user.name if user else "Клиент",
+            "branch": new_appointment.branch_name or source.branch_name if source else "—",
+            "master": new_appointment.master_name or source.master_name if source else "—",
+            "service": service_name,
+            "old_date": old_date_text,
+            "old_time": old_time_text,
+            "new_date": new_date_text,
+            "new_time": new_time_text,
+        },
+    )
+    await _notify_admins(callback.bot, admin_text)
+    master_chat_id = _resolve_master_notify_chat_id(new_appointment.master_key or master_key)
+    if master_chat_id:
+        master_text = _render_template(
+            get_settings().notify_master_rescheduled_text,
+            {
+                "client": user.name if user else "Клиент",
+                "service": service_name,
+                "old_date": old_date_text,
+                "old_time": old_time_text,
+                "new_date": new_date_text,
+                "new_time": new_time_text,
+            },
+        )
+        try:
+            await callback.bot.send_message(chat_id=master_chat_id, text=master_text)
+        except Exception:
+            pass
+
     await safe_callback_answer(callback)
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(
-        "Запись успешно перенесена ✅\n\n"
-        f"Услуга: {service_name}\n"
-        f"Дата: {_human_booking_date(new_appointment.date)}\n"
-        f"Время: {new_appointment.start_time.strftime('%H:%M')}–{new_appointment.end_time.strftime('%H:%M')}",
-        reply_markup=menu_keyboard_for_role(role),
+    client_text = _render_template(
+        get_settings().notify_client_rescheduled_text,
+        {
+            "service": service_name,
+            "new_date": new_date_text,
+            "new_time": new_time_text,
+        },
     )
+    await callback.message.answer(client_text, reply_markup=menu_keyboard_for_role(role))
+
+
+@router.message(Command("no_show"))
+async def mark_no_show(message: Message) -> None:
+    user = await users_repo.get_by_user_id(message.from_user.id)
+    if user is None or user.role != "admin":
+        await message.answer("Недостаточно прав.")
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /no_show &lt;appointment_id&gt;")
+        return
+    try:
+        appointment_id = int(parts[1])
+    except ValueError:
+        await message.answer("appointment_id должен быть числом.")
+        return
+    appt = await booking_service.mark_no_show_by_id(appointment_id)
+    if appt is None:
+        await message.answer("Не удалось установить no-show: запись не найдена или уже не active.")
+        return
+
+    client = await booking_service.get_user(appt.user_id)
+    service = await services_repo.get_by_id(appt.service_id)
+    service_name = service.name if service else f"Услуга #{appt.service_id}"
+    date_text = _human_booking_date(appt.date)
+    time_text = f"{appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}"
+    values = {
+        "client": client.name if client else "Клиент",
+        "branch": appt.branch_name or "—",
+        "master": appt.master_name or "—",
+        "service": service_name,
+        "date": date_text,
+        "time": time_text,
+    }
+    await _notify_admins(message.bot, _render_template(get_settings().notify_admin_no_show_text, values))
+    if client is not None:
+        try:
+            await message.bot.send_message(
+                chat_id=client.user_id,
+                text=_render_template(get_settings().notify_client_no_show_text, values),
+            )
+        except Exception:
+            pass
+    master_chat_id = _resolve_master_notify_chat_id(appt.master_key)
+    if master_chat_id:
+        try:
+            await message.bot.send_message(
+                chat_id=master_chat_id,
+                text=_render_template(get_settings().notify_master_no_show_text, values),
+            )
+        except Exception:
+            pass
+    await message.answer(f"No-show установлен ✅ для записи #{appointment_id}")

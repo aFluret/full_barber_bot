@@ -141,6 +141,20 @@ class AppointmentsRepository:
         await asyncio.to_thread(_op)
         return existing
 
+    async def mark_no_show_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        existing = await self.get_by_id(appointment_id)
+        if existing is None or existing.status != "confirmed":
+            return None
+
+        def _op() -> None:
+            client = get_supabase_client()
+            client.table("appointments").update({"status": "no_show"}).eq("id", appointment_id).eq(
+                "status", "confirmed"
+            ).execute()
+
+        await asyncio.to_thread(_op)
+        return existing
+
     async def list_confirmed_intervals(
         self,
         target_date: date,
