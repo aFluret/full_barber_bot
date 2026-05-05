@@ -25,6 +25,7 @@ from src.infra.db.repositories.appointments_repository import (
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.users_repository import UsersRepository
 from src.infra.db.repositories.masters_repository import MastersRepository
+from src.infra.db.repositories.time_blocks_repository import TimeBlocksRepository
 from src.infra.config.settings import get_settings
 
 
@@ -44,6 +45,7 @@ class BookingService:
         self._appointments_repo = AppointmentsRepository()
         self._services_repo = ServicesRepository()
         self._masters_repo = MastersRepository()
+        self._time_blocks_repo = TimeBlocksRepository()
         self._reminder_service = ReminderService()
 
     async def get_user(self, user_id: int) -> Optional[UserModel]:
@@ -110,6 +112,10 @@ class BookingService:
         except TypeError:
             # Совместимость с тестовыми даблами/старыми реализациями репозитория.
             occupied = await self._appointments_repo.list_confirmed_intervals(target_date)
+        blocked = await self._time_blocks_repo.list_blocks_for_date(
+            target_date=target_date,
+            master_key=master_key,
+        )
 
         out: list[str] = []
         master = await self._masters_repo.get_by_key(master_key) if master_key else None
@@ -131,6 +137,8 @@ class BookingService:
                     continue
 
             if any(self._intervals_overlap(start_t, end_t, o_start, o_end) for o_start, o_end in occupied):
+                continue
+            if any(self._intervals_overlap(start_t, end_t, b_start, b_end) for b_start, b_end in blocked):
                 continue
             out.append(slot_hhmm)
 
@@ -189,6 +197,12 @@ class BookingService:
                 first_day,
                 last_day,
             )
+        blocked_by_date = await self._time_blocks_repo.list_blocks_range(
+            start_date=first_day,
+            end_date=last_day,
+            master_key=master_key,
+        )
+        master = await self._masters_repo.get_by_key(master_key) if master_key else None
 
         out: list[date] = []
         cur = first_day
@@ -229,6 +243,7 @@ class BookingService:
                 candidates = filtered
 
             occupied = intervals_by_date.get(cur, [])
+            blocked = blocked_by_date.get(cur, [])
             has_slot = False
             if service is not None:
                 for slot_hhmm in candidates:
@@ -236,9 +251,17 @@ class BookingService:
                     end_t = (
                         datetime.combine(cur, start_t) + timedelta(minutes=service.duration_minutes)
                     ).time()
+                    if master is not None:
+                        if start_t < master.work_start or end_t > master.work_end:
+                            continue
                     if any(
                         self._intervals_overlap(start_t, end_t, o_start, o_end)
                         for o_start, o_end in occupied
+                    ):
+                        continue
+                    if any(
+                        self._intervals_overlap(start_t, end_t, b_start, b_end)
+                        for b_start, b_end in blocked
                     ):
                         continue
                     has_slot = True

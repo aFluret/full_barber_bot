@@ -290,12 +290,14 @@ async def _render_calendar(
     data = await state.get_data()
     service_id = data.get("booking_service_id")
     master_key = str(data.get("booking_master_key") or "")
+    branch_id_raw = data.get("booking_branch_id")
+    branch_id = int(branch_id_raw) if branch_id_raw is not None else None
     if not service_id:
         await _safe_edit_booking_message(callback, "Сначала выбери услугу.")
         return
     if master_key == "any":
         unavailable_sets: list[set[date]] = []
-        for _, mk, _ in await _master_records():
+        for _, mk, _ in await _master_records(branch_id=branch_id):
             days = await _build_booked_days_for_month(
                 year=year,
                 month=month,
@@ -398,14 +400,16 @@ async def _show_category_step_callback(callback: CallbackQuery, state: FSMContex
 
 async def _start_booking_flow_message(message: Message, state: FSMContext) -> None:
     branch_records = await _branch_records()
-    master_records = await _master_records()
     is_barbershop = _mode_is_barbershop()
 
     has_branch_step = is_barbershop and len(branch_records) > 1
-    has_master_step = is_barbershop and len(master_records) > 1
 
     selected_branch_id, selected_branch = branch_records[0]
-    selected_master_id, selected_master_key, selected_master = master_records[0]
+    master_records = await _master_records(branch_id=selected_branch_id if is_barbershop else None)
+    has_master_step = is_barbershop and len(master_records) > 1
+    selected_master_id, selected_master_key, selected_master = (
+        master_records[0] if master_records else (0, "any", "Любой мастер")
+    )
     if has_master_step and get_settings().enable_any_master_option:
         selected_master_id = 0
         selected_master_key = "any"
@@ -504,10 +508,10 @@ async def choose_branch(callback: CallbackQuery, state: FSMContext) -> None:
 
     selected_branch_id, selected_branch_name = branch_records[idx]
     await state.update_data(booking_branch_id=selected_branch_id, booking_branch=selected_branch_name)
-    data = await state.get_data()
-    has_master_step = bool(data.get("booking_has_master_step"))
     master_records = await _master_records(branch_id=selected_branch_id)
-    if has_master_step and len(master_records) > 1:
+    has_master_step = len(master_records) > 1
+    await state.update_data(booking_has_master_step=has_master_step)
+    if has_master_step:
         await state.set_state(BookingStates.waiting_master)
         await _safe_edit_booking_message(
             callback,

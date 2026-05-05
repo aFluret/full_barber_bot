@@ -164,3 +164,61 @@ class MastersRepository:
                 return False
 
         return await asyncio.to_thread(_op)
+
+    async def list_branch_ids_by_master_key(self, master_key: str) -> List[int]:
+        def _op() -> List[int]:
+            client = get_supabase_client()
+            try:
+                master = (
+                    client.table("masters")
+                    .select("id")
+                    .eq("master_key", master_key)
+                    .limit(1)
+                    .execute()
+                )
+                row = (master.data or [None])[0]
+                if not row or row.get("id") is None:
+                    return []
+                rel = (
+                    client.table("master_branches")
+                    .select("branch_id")
+                    .eq("master_id", int(row["id"]))
+                    .execute()
+                )
+            except Exception:
+                return []
+            out: List[int] = []
+            for r in rel.data or []:
+                if r.get("branch_id") is not None:
+                    out.append(int(r["branch_id"]))
+            return sorted(set(out))
+
+        return await asyncio.to_thread(_op)
+
+    async def set_branch_binding(self, master_key: str, branch_id: int, linked: bool) -> bool:
+        def _op() -> bool:
+            client = get_supabase_client()
+            try:
+                master = (
+                    client.table("masters")
+                    .select("id")
+                    .eq("master_key", master_key)
+                    .limit(1)
+                    .execute()
+                )
+                row = (master.data or [None])[0]
+                if not row or row.get("id") is None:
+                    return False
+                master_id = int(row["id"])
+                if linked:
+                    payload = {"master_id": master_id, "branch_id": int(branch_id)}
+                    client.table("master_branches").upsert(payload, on_conflict="master_id,branch_id").execute()
+                    return True
+                client.table("master_branches").delete().eq("master_id", master_id).eq(
+                    "branch_id", int(branch_id)
+                ).execute()
+                return True
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_op)

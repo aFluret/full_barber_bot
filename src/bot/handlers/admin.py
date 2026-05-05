@@ -202,6 +202,8 @@ def _parse_hhmm_compact_or_none(raw: str):
 
 async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
     masters = await masters_repo.list_all()
+    branches = await branches_repo.list_all()
+    branches_map = {b.id: b.name for b in branches}
     if not masters:
         return "Мастера не найдены.", InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_master:refresh")]]
@@ -211,8 +213,12 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
     keyboard: list[list[InlineKeyboardButton]] = []
     for m in masters:
         status = "ON" if m.is_active else "OFF"
+        linked_ids = await masters_repo.list_branch_ids_by_master_key(m.master_key)
+        linked_names = [branches_map.get(branch_id, f"#{branch_id}") for branch_id in linked_ids]
+        links_label = ", ".join(linked_names) if linked_names else "не привязан"
         lines.append(
-            f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}"
+            f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}\n"
+            f"  Филиалы: {links_label}"
         )
         keyboard.append(
             [
@@ -229,10 +235,42 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
                 InlineKeyboardButton(text="12-20", callback_data=f"admin_master:set:{m.master_key}:1200:2000"),
             ]
         )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🏬 Привязки: {m.name}",
+                    callback_data=f"admin_master:bindings:{m.master_key}",
+                )
+            ]
+        )
 
     lines.append("\nДля точного времени: /master_hours &lt;master_key&gt; &lt;HH:MM&gt; &lt;HH:MM&gt;")
+    lines.append("Привязка филиалов: /master_branch_add &lt;master_key&gt; &lt;branch_id&gt;")
+    lines.append("Открепление: /master_branch_remove &lt;master_key&gt; &lt;branch_id&gt;")
     keyboard.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_master:refresh")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _master_bindings_keyboard(
+    master_key: str,
+    branches: list,
+    linked_branch_ids: set[int],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for branch in branches:
+        is_linked = branch.id in linked_branch_ids
+        action = "detach" if is_linked else "attach"
+        label = ("🧷 Открепить" if is_linked else "➕ Закрепить") + f" #{branch.id} {branch.name}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"admin_master:bind:{action}:{master_key}:{branch.id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="← К мастерам", callback_data="admin_master:refresh")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _branches_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
@@ -246,7 +284,9 @@ async def _branches_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup
     keyboard: list[list[InlineKeyboardButton]] = []
     for b in branches:
         status = "ON" if b.is_active else "OFF"
-        lines.append(f"- #{b.id} {b.name} [{status}]")
+        masters = await masters_repo.list_all(branch_id=b.id)
+        master_names = ", ".join(m.name for m in masters) if masters else "нет привязанных мастеров"
+        lines.append(f"- #{b.id} {b.name} [{status}]\n  Мастера: {master_names}")
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -328,6 +368,48 @@ async def admin_master_hours(message: Message, state: FSMContext) -> None:
         if ok
         else "Не удалось обновить график мастера."
     )
+
+
+@router.message(Command("master_branch_add"))
+async def admin_master_branch_add(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 3:
+        await message.answer("Использование: /master_branch_add &lt;master_key&gt; &lt;branch_id&gt;")
+        return
+    master_key = parts[1].strip()
+    try:
+        branch_id = int(parts[2])
+    except ValueError:
+        await message.answer("branch_id должен быть числом.")
+        return
+    ok = await masters_repo.set_branch_binding(master_key, branch_id, True)
+    await message.answer("Привязка добавлена ✅" if ok else "Не удалось добавить привязку.")
+
+
+@router.message(Command("master_branch_remove"))
+async def admin_master_branch_remove(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 3:
+        await message.answer("Использование: /master_branch_remove &lt;master_key&gt; &lt;branch_id&gt;")
+        return
+    master_key = parts[1].strip()
+    try:
+        branch_id = int(parts[2])
+    except ValueError:
+        await message.answer("branch_id должен быть числом.")
+        return
+    ok = await masters_repo.set_branch_binding(master_key, branch_id, False)
+    await message.answer("Привязка удалена ✅" if ok else "Не удалось удалить привязку.")
 
 
 @router.message(Command("branches"))
@@ -428,6 +510,81 @@ async def admin_master_set_hours_preset(callback: CallbackQuery, state: FSMConte
     await masters_repo.set_work_hours(master_key, start_t, end_t)
     text, kb = await _masters_panel_text_and_keyboard()
     await _safe_edit_admin_panel(callback, text, reply_markup=kb)
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("admin_master:bindings:"))
+async def admin_master_bindings_open(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    master_key = parts[2]
+    master = await masters_repo.get_by_key(master_key)
+    if master is None:
+        await safe_callback_answer(callback, "Мастер не найден", show_alert=True)
+        return
+    branches = await branches_repo.list_all()
+    linked_ids = set(await masters_repo.list_branch_ids_by_master_key(master_key))
+    linked_names = [b.name for b in branches if b.id in linked_ids]
+    linked_text = ", ".join(linked_names) if linked_names else "не привязан ни к одному филиалу"
+    text = (
+        f"🏬 Привязки мастера: {master.name} ({master.master_key})\n\n"
+        f"Текущие филиалы: {linked_text}\n\n"
+        "Выбери действие:"
+    )
+    await _safe_edit_admin_panel(
+        callback,
+        text,
+        reply_markup=_master_bindings_keyboard(master_key, branches, linked_ids),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("admin_master:bind:"))
+async def admin_master_bindings_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != AdminPanelStates.in_menu.state:
+        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 5:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    _, _, action, master_key, branch_id_raw = parts
+    try:
+        branch_id = int(branch_id_raw)
+    except ValueError:
+        await safe_callback_answer(callback, "Некорректная команда", show_alert=True)
+        return
+    if action not in {"attach", "detach"}:
+        await safe_callback_answer(callback, "Некорректное действие", show_alert=True)
+        return
+    ok = await masters_repo.set_branch_binding(master_key, branch_id, action == "attach")
+    if not ok:
+        await safe_callback_answer(callback, "Не удалось сохранить привязку", show_alert=True)
+        return
+
+    master = await masters_repo.get_by_key(master_key)
+    if master is None:
+        await safe_callback_answer(callback, "Мастер не найден", show_alert=True)
+        return
+    branches = await branches_repo.list_all()
+    linked_ids = set(await masters_repo.list_branch_ids_by_master_key(master_key))
+    linked_names = [b.name for b in branches if b.id in linked_ids]
+    linked_text = ", ".join(linked_names) if linked_names else "не привязан ни к одному филиалу"
+    text = (
+        f"🏬 Привязки мастера: {master.name} ({master.master_key})\n\n"
+        f"Текущие филиалы: {linked_text}\n\n"
+        "Выбери действие:"
+    )
+    await _safe_edit_admin_panel(
+        callback,
+        text,
+        reply_markup=_master_bindings_keyboard(master_key, branches, linked_ids),
+    )
     await safe_callback_answer(callback)
 
 
@@ -719,6 +876,8 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "/master_on &lt;key&gt; — включить мастера\n"
         "/master_off &lt;key&gt; — выключить мастера\n"
         "/master_hours &lt;key&gt; 10:00 18:00 — задать часы мастера\n\n"
+        "/master_branch_add &lt;key&gt; &lt;branch_id&gt; — закрепить мастера за филиалом\n"
+        "/master_branch_remove &lt;key&gt; &lt;branch_id&gt; — открепить мастера от филиала\n\n"
         "🏬 Филиалы:\n"
         "/branches — список филиалов и статусов\n"
         "/branch_on &lt;id&gt; — включить филиал\n"

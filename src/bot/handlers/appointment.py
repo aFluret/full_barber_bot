@@ -261,11 +261,17 @@ async def _safe_edit(message: CallbackQuery, text: str, reply_markup=None) -> No
         await message.message.answer(text, reply_markup=reply_markup)
 
 
-async def _build_booked_days_for_month(year: int, month: int, service_id: int) -> list[date]:
+async def _build_booked_days_for_month(
+    year: int,
+    month: int,
+    service_id: int,
+    master_key: str | None = None,
+) -> list[date]:
     return await booking_service.dates_without_available_slots_in_month(
         year=year,
         month=month,
         service_id=service_id,
+        master_key=master_key,
     )
 
 
@@ -341,10 +347,11 @@ async def _render_reschedule_calendar(
 ) -> None:
     data = await state.get_data()
     service_id = data.get("reschedule_service_id")
+    master_key = str(data.get("reschedule_master_key") or "") or None
     if not service_id:
         await _safe_edit(callback, "Не удалось определить услугу для переноса.")
         return
-    booked = await _build_booked_days_for_month(year, month, int(service_id))
+    booked = await _build_booked_days_for_month(year, month, int(service_id), master_key=master_key)
     await state.update_data(calendar_year=year, calendar_month=month)
     await _safe_edit(
         callback,
@@ -371,9 +378,15 @@ async def start_reschedule(message: Message, state: FSMContext) -> None:
     await state.update_data(
         reschedule_appointment_id=active.id,
         reschedule_service_id=active.service_id,
+        reschedule_master_key=active.master_key,
     )
     today = date.today()
-    booked = await _build_booked_days_for_month(today.year, today.month, active.service_id)
+    booked = await _build_booked_days_for_month(
+        today.year,
+        today.month,
+        active.service_id,
+        master_key=active.master_key,
+    )
     await message.answer(
         "Выбери новую дату:",
         reply_markup=_reschedule_calendar_keyboard(today.year, today.month, booked),
@@ -398,9 +411,15 @@ async def start_reschedule_from_list(callback: CallbackQuery, state: FSMContext)
     await state.update_data(
         reschedule_appointment_id=appt.id,
         reschedule_service_id=appt.service_id,
+        reschedule_master_key=appt.master_key,
     )
     today = date.today()
-    booked = await _build_booked_days_for_month(today.year, today.month, appt.service_id)
+    booked = await _build_booked_days_for_month(
+        today.year,
+        today.month,
+        appt.service_id,
+        master_key=appt.master_key,
+    )
     await safe_callback_answer(callback)
     await _safe_edit(
         callback,
@@ -453,11 +472,16 @@ async def reschedule_pick_date(callback: CallbackQuery, state: FSMContext) -> No
 
     state_data = await state.get_data()
     service_id = state_data.get("reschedule_service_id")
+    master_key = str(state_data.get("reschedule_master_key") or "") or None
     if not service_id:
         await safe_callback_answer(callback, "Не удалось определить услугу", show_alert=True)
         return
 
-    slots = await booking_service.list_available_time_slots(target_date, int(service_id))
+    slots = await booking_service.list_available_time_slots(
+        target_date,
+        int(service_id),
+        master_key=master_key,
+    )
     if not slots:
         await safe_callback_answer(callback)
         await _render_reschedule_calendar(
@@ -561,6 +585,7 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
     hhmm = data.get("reschedule_time")
     source_id = data.get("reschedule_appointment_id")
     service_id = data.get("reschedule_service_id")
+    master_key = str(data.get("reschedule_master_key") or "") or None
     if not iso or not source_id or not service_id:
         await safe_callback_answer(callback, "Недостаточно данных для переноса", show_alert=True)
         return
@@ -568,7 +593,11 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
     target_date = date.fromisoformat(str(iso))
     if action == "0":
         await state.set_state(RescheduleStates.waiting_time)
-        slots = await booking_service.list_available_time_slots(target_date, int(service_id))
+        slots = await booking_service.list_available_time_slots(
+            target_date,
+            int(service_id),
+            master_key=master_key,
+        )
         await safe_callback_answer(callback)
         await _safe_edit(
             callback,
