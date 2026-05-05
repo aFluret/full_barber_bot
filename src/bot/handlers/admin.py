@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import calendar
+import html
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -27,6 +28,7 @@ from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepos
 from src.infra.db.repositories.masters_repository import MastersRepository
 from src.infra.db.repositories.branches_repository import BranchesRepository
 from src.app.services.schedule_service import ScheduleService
+from src.infra.db.models import ServiceModel
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
 from src.bot.keyboards.main_menu import admin_menu_keyboard, main_menu_keyboard
@@ -124,6 +126,81 @@ async def _render_day_report(target_date: date) -> str:
     return "\n".join(lines)
 
 
+async def _services_report_text() -> str:
+    services = await services_repo.list_all()
+    if not services:
+        return "Услуги не настроены."
+    lines = ["✂️ Услуги:\n"]
+    for svc in services:
+        safe_name = html.escape(svc.name)
+        lines.append(
+            f"- #{svc.id} {safe_name}\n"
+            f"  Цена: {svc.price_byn} BYN | Длительность: {svc.duration_minutes} мин"
+        )
+    lines.append(
+        "\nИзменить/добавить: /service_set &lt;id&gt; &lt;price_byn&gt; &lt;duration_min&gt; &lt;название&gt;\n"
+        "Пример: /service_set 5 70 45 Мужская стрижка premium"
+    )
+    return "\n".join(lines)
+
+
+async def _stats_report_text() -> str:
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    today_items = await appointments_repo.list_by_date_from_today(today)
+    tomorrow_items = await appointments_repo.list_by_date_from_today(tomorrow)
+    future_items = await appointments_repo.list_confirmed_from_date(today)
+
+    services = await services_repo.list_all()
+    price_map = {s.id: s.price_byn for s in services}
+
+    def _sum(items) -> int:
+        return sum(int(price_map.get(i.service_id, 0)) for i in items)
+
+    today_sum = _sum(today_items)
+    tomorrow_sum = _sum(tomorrow_items)
+    future_sum = _sum(future_items)
+
+    return (
+        "📊 Базовая статистика\n\n"
+        f"Сегодня: {len(today_items)} записей | {today_sum} BYN\n"
+        f"Завтра: {len(tomorrow_items)} записей | {tomorrow_sum} BYN\n"
+        f"Все будущие: {len(future_items)} записей | {future_sum} BYN"
+    )
+
+
+async def _master_load_report_text() -> str:
+    items = await appointments_repo.list_confirmed_from_date(date.today())
+    if not items:
+        return "Загрузка мастеров: будущих записей нет."
+
+    services = await services_repo.list_all()
+    price_map = {s.id: s.price_byn for s in services}
+    masters = await masters_repo.list_all()
+
+    load: dict[str, dict[str, int | str]] = {}
+    for m in masters:
+        load[m.master_key] = {"name": m.name, "count": 0, "sum": 0}
+
+    for appt in items:
+        key = (appt.master_key or "").strip() or f"name:{(appt.master_name or 'unknown').strip()}"
+        if key not in load:
+            load[key] = {
+                "name": appt.master_name or key,
+                "count": 0,
+                "sum": 0,
+            }
+        load[key]["count"] = int(load[key]["count"]) + 1
+        load[key]["sum"] = int(load[key]["sum"]) + int(price_map.get(appt.service_id, 0))
+
+    rows = sorted(load.values(), key=lambda x: (int(x["count"]), int(x["sum"])), reverse=True)
+    lines = ["📈 Загрузка мастеров (будущие записи):\n"]
+    for row in rows:
+        lines.append(f"- {row['name']}: {row['count']} записей | {row['sum']} BYN")
+    return "\n".join(lines)
+
+
 @router.message(Command("today"))
 async def today_appointments(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
@@ -185,6 +262,84 @@ async def all_future_appointments(message: Message, state: FSMContext) -> None:
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━━\nВсего: {len(appts)} записи | Сумма: {total_sum} BYN")
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("services"))
+async def admin_services_list(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await message.answer(await _services_report_text())
+
+
+@router.message(Command("service_set"))
+async def admin_service_set(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split(maxsplit=4)
+    if len(parts) != 5:
+        await message.answer(
+            "Использование: /service_set <id> <price_byn> <duration_min> <название>\n"
+            "Пример: /service_set 5 70 45 Мужская стрижка premium"
+        )
+        return
+    try:
+        service_id = int(parts[1])
+        price_byn = int(parts[2])
+        duration_minutes = int(parts[3])
+    except ValueError:
+        await message.answer("id, price_byn и duration_min должны быть числами.")
+        return
+    name = parts[4].strip()
+    if not name:
+        await message.answer("Название услуги не должно быть пустым.")
+        return
+    if price_byn < 0 or duration_minutes <= 0:
+        await message.answer("price_byn >= 0 и duration_min > 0.")
+        return
+
+    await services_repo.upsert_service(
+        ServiceModel(
+            id=service_id,
+            name=name,
+            price_byn=price_byn,
+            duration_minutes=duration_minutes,
+        )
+    )
+    safe_name = html.escape(name)
+    await message.answer(
+        f"Услуга сохранена ✅\n"
+        f"#{service_id} {safe_name}\n"
+        f"Цена: {price_byn} BYN | Длительность: {duration_minutes} мин"
+    )
+
+
+@router.message(Command("stats"))
+async def admin_stats(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await message.answer(await _stats_report_text())
+
+
+@router.message(Command("master_load"))
+async def admin_master_load(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    await _delete_tracked_admin_inline_message(message, state)
+    await message.answer(await _master_load_report_text())
 
 
 def _parse_hhmm_or_none(raw: str):
@@ -867,6 +1022,12 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "/today — записи на сегодня\n"
         "/tomorrow — записи на завтра\n"
         "/all — все будущие записи\n\n"
+        "📊 Отчёты:\n"
+        "/stats — базовая статистика (записи/выручка)\n"
+        "/master_load — загрузка мастеров\n\n"
+        "✂️ Услуги:\n"
+        "/services — список услуг\n"
+        "/service_set &lt;id&gt; &lt;price&gt; &lt;duration&gt; &lt;name&gt; — добавить/изменить услугу\n\n"
         "⚙️ Настройки:\n"
         "/schedule — посмотреть текущий график работы\n"
         "/set_schedule — изменить график работы\n"

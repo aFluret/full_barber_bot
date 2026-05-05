@@ -27,6 +27,8 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="/today"), KeyboardButton(text="/tomorrow")],
             [KeyboardButton(text="/all")],
+            [KeyboardButton(text="/stats"), KeyboardButton(text="/master_load")],
+            [KeyboardButton(text="/services")],
             [KeyboardButton(text="/schedule"), KeyboardButton(text="/set_schedule")],
             [KeyboardButton(text="/masters"), KeyboardButton(text="/branches")],
             [KeyboardButton(text="/exit")],
