@@ -157,6 +157,7 @@ async def my_appointments(message: Message) -> None:
                 InlineKeyboardButton(text="❌ Отменить активную", callback_data=f"ap_cancel_prompt:{first_active.id}"),
             ]
         )
+    actions.append([InlineKeyboardButton(text="🔁 Повторить прошлую запись", callback_data="bk_repeat_last")])
     actions.append([InlineKeyboardButton(text="📅 Записаться снова", callback_data="bk_restart_service")])
 
     await message.answer("\n".join(lines), reply_markup=menu_keyboard_for_role(user_role))
@@ -411,6 +412,11 @@ async def start_reschedule_from_list(callback: CallbackQuery, state: FSMContext)
 @router.callback_query(F.data.startswith("rs_cal"))
 async def reschedule_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != RescheduleStates.waiting_date.state:
+        await safe_callback_answer(
+            callback,
+            "Сценарий переноса устарел. Открой «🔄 Перенести запись» заново.",
+            show_alert=True,
+        )
         return
 
     data = callback.data
@@ -510,6 +516,11 @@ async def reschedule_exit(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("rs_time:"))
 async def reschedule_pick_time(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != RescheduleStates.waiting_time.state:
+        await safe_callback_answer(
+            callback,
+            "Сначала выберите дату для переноса.",
+            show_alert=True,
+        )
         return
 
     time_slot = callback.data.split(":", 1)[1].strip()
@@ -537,6 +548,11 @@ async def reschedule_pick_time(callback: CallbackQuery, state: FSMContext) -> No
 @router.callback_query(F.data.startswith("rs_confirm:"))
 async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != RescheduleStates.waiting_confirm.state:
+        await safe_callback_answer(
+            callback,
+            "Кнопка подтверждения устарела. Начните перенос заново.",
+            show_alert=True,
+        )
         return
 
     action = callback.data.split(":", 1)[1]

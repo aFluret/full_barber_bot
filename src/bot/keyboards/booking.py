@@ -51,6 +51,15 @@ def _format_date_button_text(d: date, today: date | None = None) -> str:
     return f"{RU_WEEKDAY_ABBR[d.weekday()]}, {d.day} {RU_MONTHS_GEN[d.month]}"
 
 
+def _format_duration(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, rest = divmod(minutes, 60)
+    if rest == 0:
+        return f"{hours} ч"
+    return f"{hours} ч {rest} мин"
+
+
 def date_picker_keyboard_with_back(dates: list[date], back_callback_data: str | None) -> InlineKeyboardMarkup:
     today = date.today()
     # Показываем по 3 кнопки в ряду, чтобы уменьшить количество скролла.
@@ -84,10 +93,11 @@ def services_picker_keyboard(
     buttons: list[list[InlineKeyboardButton]] = []
     # Вертикальный список: по одной кнопке в ряд.
     for s in services:
+        price_label = f"{s.price_byn} BYN" if s.price_byn else "цена по запросу"
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f"{s.name} — {s.price_byn} BYN",
+                    text=f"{s.name} • {_format_duration(s.duration_minutes)} • {price_label}",
                     callback_data=f"bk_service:{s.id}",
                 )
             ]

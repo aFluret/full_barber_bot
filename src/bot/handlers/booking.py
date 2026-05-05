@@ -146,6 +146,43 @@ def _normalize_comment(raw: str | None) -> str:
     return value[:300]
 
 
+def _format_duration(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, rest = divmod(minutes, 60)
+    if rest == 0:
+        return f"{hours} ч"
+    return f"{hours} ч {rest} мин"
+
+
+def _parse_master_notify_map(raw: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for chunk in (raw or "").split(","):
+        pair = chunk.strip()
+        if not pair:
+            continue
+        sep = ":" if ":" in pair else ("=" if "=" in pair else None)
+        if sep is None:
+            continue
+        key_raw, user_id_raw = pair.split(sep, 1)
+        key = key_raw.strip()
+        if not key:
+            continue
+        try:
+            out[key] = int(user_id_raw.strip())
+        except ValueError:
+            continue
+    return out
+
+
+def _resolve_master_notify_chat_id(master_key: str | None) -> int | None:
+    key = (master_key or "").strip()
+    if not key:
+        return None
+    mapping = _parse_master_notify_map(get_settings().master_telegram_map)
+    return mapping.get(key)
+
+
 async def _build_booking_confirm_text(
     *,
     booking_date: date,
@@ -158,6 +195,7 @@ async def _build_booking_confirm_text(
     service = await services_repo.get_by_id(service_id)
     service_name = service.name if service is not None else f"Услуга #{service_id}"
     service_price = f"{service.price_byn} BYN" if service is not None else "уточняется"
+    service_duration = _format_duration(service.duration_minutes) if service is not None else "уточняется"
     comment_text = comment if comment else "без комментария"
     return (
         "Подтверди запись:\n"
@@ -166,6 +204,7 @@ async def _build_booking_confirm_text(
         f"Дата: {_human_booking_date(booking_date)}\n"
         f"Время: {booking_time}\n"
         f"Услуга: {service_name}\n"
+        f"Длительность: {service_duration}\n"
         f"Стоимость: {service_price}\n"
         f"Комментарий: {comment_text}"
     )
@@ -561,6 +600,95 @@ async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext
     await safe_callback_answer(callback)
 
 
+@router.callback_query(F.data == "bk_repeat_last")
+async def repeat_last_booking(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id
+    user = await booking_service.get_user(user_id)
+    if user is None:
+        await safe_callback_answer(callback, "Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    history = await booking_service.list_user_appointments(user_id, limit=20)
+    if not history:
+        await safe_callback_answer(callback, "История записей пуста.", show_alert=True)
+        return
+    latest = history[0]
+
+    service = await services_repo.get_by_id(latest.service_id)
+    if service is None:
+        await safe_callback_answer(
+            callback,
+            "Услуга из прошлой записи больше недоступна. Выберите услугу вручную.",
+            show_alert=True,
+        )
+        return
+
+    await state.clear()
+    is_barbershop = _mode_is_barbershop()
+    branch_records = await _branch_records()
+
+    selected_branch_id, selected_branch_name = branch_records[0]
+    if is_barbershop and latest.branch_id is not None:
+        for b_id, b_name in branch_records:
+            if b_id == latest.branch_id:
+                selected_branch_id, selected_branch_name = b_id, b_name
+                break
+
+    master_records = await _master_records(branch_id=selected_branch_id if is_barbershop else None)
+    has_branch_step = is_barbershop and len(branch_records) > 1
+    has_master_step = is_barbershop and len(master_records) > 1
+
+    selected_master_id = None
+    selected_master_key = "any" if get_settings().enable_any_master_option else ""
+    selected_master_name = "Любой мастер" if get_settings().enable_any_master_option else "—"
+
+    latest_master_key = (latest.master_key or "").strip()
+    if latest_master_key:
+        for m_id, m_key, m_name in master_records:
+            if m_key == latest_master_key:
+                selected_master_id = m_id
+                selected_master_key = m_key
+                selected_master_name = m_name
+                break
+
+    if selected_master_key in {"", "any"} and master_records and not get_settings().enable_any_master_option:
+        selected_master_id, selected_master_key, selected_master_name = master_records[0]
+
+    await state.update_data(
+        booking_has_branch_step=has_branch_step,
+        booking_has_master_step=has_master_step,
+        booking_branch_id=selected_branch_id,
+        booking_branch=selected_branch_name,
+        booking_master_id=selected_master_id,
+        booking_master_key=selected_master_key or "any",
+        booking_master=selected_master_name,
+        booking_service_id=service.id,
+        booking_category_key="",
+    )
+
+    for key in OREDR_CATEGORY_KEYS:
+        if service.name in SERVICE_CATEGORIES.get(key, []):
+            await state.update_data(booking_category_key=key)
+            break
+
+    await state.set_state(BookingStates.waiting_date)
+    await safe_callback_answer(callback)
+    today = _local_today()
+    await _render_calendar(
+        callback,
+        state,
+        year=today.year,
+        month=today.month,
+        title=(
+            "Повторяем прошлый сценарий записи:\n"
+            f"Филиал: {selected_branch_name}\n"
+            f"Мастер: {selected_master_name}\n"
+            f"Услуга: {service.name} ({_format_duration(service.duration_minutes)}, {service.price_byn} BYN)\n\n"
+            "Выбери новую дату:"
+        ),
+    )
+
+
 @router.callback_query(F.data == "bk_back:category")
 async def back_to_category(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() not in {BookingStates.waiting_service.state, BookingStates.waiting_date.state}:
@@ -924,6 +1052,14 @@ async def handle_booking_comment(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("bk_confirm:"))
 async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != BookingStates.waiting_confirm.state:
+        await safe_callback_answer(
+            callback,
+            "Кнопка устарела. Начните запись заново через «📅 Записаться».",
+            show_alert=True,
+        )
+        return
+
     action = callback.data.split(":", 1)[1]
     data = await state.get_data()
 
@@ -1049,6 +1185,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     service = await services_repo.get_by_id(appointment.service_id)
     service_name = service.name if service is not None else f"Услуга #{appointment.service_id}"
     service_price = service.price_byn if service is not None else 0
+    service_duration = service.duration_minutes if service is not None else 0
 
     # Уведомляем администраторов сразу после успешного подтверждения записи.
     admins = await users_repo.list_admins()
@@ -1075,11 +1212,30 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             return_exceptions=True,
         )
 
+    master_chat_id = _resolve_master_notify_chat_id(booking_master_key)
+    if master_chat_id:
+        master_comment_text = booking_comment if booking_comment else "без комментария"
+        master_notify_text = (
+            "🧾 Новая запись к вам\n\n"
+            f"Клиент: {user_name}\n"
+            f"Телефон: {user.phone if user else 'не указан'}\n"
+            f"Филиал: {booking_branch}\n"
+            f"Услуга: {service_name}\n"
+            f"Дата: {_human_booking_date(appointment.date)}\n"
+            f"Время: {appointment.start_time.strftime('%H:%M')}–{appointment.end_time.strftime('%H:%M')}\n"
+            f"Комментарий: {master_comment_text}"
+        )
+        try:
+            await callback.bot.send_message(chat_id=master_chat_id, text=master_notify_text)
+        except Exception:
+            pass
+
     await callback.message.answer(
         "Готово! Ты записан ✅\n\n"
         f"Филиал: {booking_branch}\n"
         f"Мастер: {booking_master}\n"
         f"Услуга: {service_name}\n"
+        f"Длительность: {_format_duration(service_duration) if service_duration else 'уточняется'}\n"
         f"Дата: {_human_booking_date(appointment.date)}\n"
         f"Время: {appointment.start_time.strftime('%H:%M')}\n"
         f"Стоимость: {service_price} BYN\n\n"

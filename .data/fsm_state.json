@@ -1,0 +1,14 @@
+{
+  "8696859875:424666580:424666580:::default": {
+    "state": "<State 'BookingStates:waiting_category'>",
+    "data": {
+      "booking_has_branch_step": true,
+      "booking_has_master_step": false,
+      "booking_branch_id": 1,
+      "booking_branch": "Рокоссовского 145",
+      "booking_master_id": 3,
+      "booking_master_key": "zhenya",
+      "booking_master": "Женя"
+    }
+  }
+}

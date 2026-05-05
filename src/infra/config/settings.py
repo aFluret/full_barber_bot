@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     branches_csv: str = "Основной филиал"
     masters_csv: str = "Илья"
     enable_any_master_option: bool = True
+    # Формат: "ilya:123456789,maksim:987654321" (master_key -> telegram user_id мастера)
+    master_telegram_map: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

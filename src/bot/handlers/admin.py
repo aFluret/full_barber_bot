@@ -732,8 +732,10 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("exit"))
 async def exit_admin_panel(message: Message, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await message.answer("Ты уже в обычном режиме.")
+    user = await users_repo.get_by_user_id(message.from_user.id)
+    if user is None or user.role != "admin":
+        await state.clear()
+        await message.answer("Ты уже в обычном режиме.", reply_markup=main_menu_keyboard())
         return
     await _delete_tracked_admin_inline_message(message, state)
     await users_repo.set_role(message.from_user.id, "client")
