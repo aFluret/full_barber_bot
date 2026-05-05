@@ -301,7 +301,10 @@ async def cancel_appointment_confirm(callback: CallbackQuery, state: FSMContext)
         return
 
     source = await booking_service.get_appointment_by_id(appointment_id)
-    if source is None or source.user_id != callback.from_user.id or source.status != "confirmed":
+    if source is None or source.user_id != callback.from_user.id:
+        await safe_callback_answer(callback, "Запись уже неактивна", show_alert=True)
+        return
+    if source.status != "confirmed" or not _is_active(source.status, source.date, source.end_time):
         await safe_callback_answer(callback, "Запись уже неактивна", show_alert=True)
         return
 
@@ -713,6 +716,20 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
         return
     if not hhmm:
         await safe_callback_answer(callback, "Сначала выбери время", show_alert=True)
+        return
+    if source is None or source.user_id != callback.from_user.id:
+        await safe_callback_answer(callback, "Запись не найдена или недоступна.", show_alert=True)
+        return
+    if source.status != "confirmed" or not _is_active(source.status, source.date, source.end_time):
+        await safe_callback_answer(callback, "Эту запись уже нельзя перенести.", show_alert=True)
+        await state.clear()
+        user = await booking_service.get_user(callback.from_user.id)
+        role = user.role if user else "client"
+        try:
+            await callback.message.edit_text("Запись больше не активна. Открой «Мои записи».")
+        except TelegramBadRequest:
+            await callback.message.answer("Запись больше не активна. Открой «Мои записи».")
+        await callback.message.answer("Выбери действие в меню ниже.", reply_markup=menu_keyboard_for_role(role))
         return
 
     try:
