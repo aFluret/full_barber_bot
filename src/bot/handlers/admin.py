@@ -28,10 +28,12 @@ from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepos
 from src.infra.db.repositories.masters_repository import MastersRepository
 from src.infra.db.repositories.branches_repository import BranchesRepository
 from src.app.services.schedule_service import ScheduleService
+from src.app.services.master_invite_service import MasterInviteService
 from src.infra.db.models import ServiceModel
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
-from src.bot.keyboards.main_menu import admin_menu_keyboard, main_menu_keyboard
+from src.bot.keyboards.main_menu import admin_menu_keyboard, menu_keyboard_for_role
+from src.infra.auth import ROLE_MASTER, is_admin_role, is_master_role
 
 router = Router()
 appointments_repo = AppointmentsRepository()
@@ -41,6 +43,7 @@ work_schedule_repo = WorkScheduleRepository()
 masters_repo = MastersRepository()
 branches_repo = BranchesRepository()
 schedule_service = ScheduleService()
+master_invite_service = MasterInviteService()
 ADMIN_INLINE_MESSAGE_ID_KEY = "admin_inline_message_id"
 MONTHLY_PREFIX = "admin_monthly"
 
@@ -60,14 +63,14 @@ async def _safe_edit_admin_panel(
 
 async def _is_admin(user_id: int) -> bool:
     user = await users_repo.get_by_user_id(user_id)
-    return bool(user and user.role == "admin")
+    return bool(user and is_admin_role(user.role))
 
 
 async def _ensure_admin_mode(message: Message, state: FSMContext) -> bool:
     current = await state.get_state()
     if current == AdminPanelStates.in_menu.state:
         return True
-    await message.answer("Ты не в админ-панели. Напиши /admin и введи код доступа.")
+    await message.answer("Ты не в админ-панели. Напиши /admin.")
     return False
 
 
@@ -373,9 +376,13 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
         linked_ids = await masters_repo.list_branch_ids_by_master_key(m.master_key)
         linked_names = [branches_map.get(branch_id, f"#{branch_id}") for branch_id in linked_ids]
         links_label = ", ".join(linked_names) if linked_names else "не привязан"
+        tg_line = (
+            f"  Telegram: {m.telegram_user_id}" if m.telegram_user_id is not None else "  Telegram: не привязан"
+        )
         lines.append(
             f"- {m.name} ({m.master_key}) [{status}] {m.work_start.strftime('%H:%M')}-{m.work_end.strftime('%H:%M')}\n"
-            f"  Филиалы: {links_label}"
+            f"  Филиалы: {links_label}\n"
+            f"{tg_line}"
         )
         keyboard.append(
             [
@@ -401,6 +408,8 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
             ]
         )
 
+    lines.append("\nОсновной онбординг: /master_invite — одноразовая ссылка для нового мастера.")
+    lines.append("Вручную к тестовой строке masters: /master_bind (моки ilya и др. только для проверки записи).")
     lines.append("\nДля точного времени: /master_hours &lt;master_key&gt; &lt;HH:MM&gt; &lt;HH:MM&gt;")
     lines.append("Привязка филиалов: /master_branch_add &lt;master_key&gt; &lt;branch_id&gt;")
     lines.append("Открепление: /master_branch_remove &lt;master_key&gt; &lt;branch_id&gt;")
@@ -994,32 +1003,17 @@ async def set_work_schedule(message: Message, state: FSMContext) -> None:
 @router.message(Command("admin"))
 async def admin_panel_entry(message: Message, state: FSMContext) -> None:
     await _delete_tracked_admin_inline_message(message, state)
-    await state.set_state(AdminPanelStates.waiting_access_code)
-    await message.answer("Введи код доступа 🔐")
-
-
-@router.message(AdminPanelStates.waiting_access_code)
-async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
-    code = (message.text or "").strip()
-    settings = get_settings()
-    expected = (settings.admin_panel_access_code or "").strip()
-
-    if not code or code != expected:
-        await message.answer("Неверный код ❌\nПопробуй ещё раз.")
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Нет доступа к админ-панели. Обратитесь к владельцу бота.")
         return
-
     user = await users_repo.get_by_user_id(message.from_user.id)
     if user is None:
-        await message.answer("Сначала пройдите регистрацию через /start, затем повторите /admin.")
-        await state.clear()
+        await message.answer("Сначала пройдите регистрацию через /start.")
         return
-
-    await users_repo.set_role(message.from_user.id, "admin")
     await state.set_state(AdminPanelStates.in_menu)
     await message.answer(
         f"Привет, {user.name}! 👋\n"
-        "Ты вошёл в админ-панель.\n\n"
-        "Вот что ты можешь делать:\n\n"
+        "Ты в админ-панели.\n\n"
         "📋 Записи:\n"
         "/today — записи на сегодня\n"
         "/tomorrow — записи на завтра\n"
@@ -1033,39 +1027,138 @@ async def admin_panel_access_code(message: Message, state: FSMContext) -> None:
         "/service_set &lt;id&gt; &lt;price&gt; &lt;duration&gt; &lt;name&gt; — добавить/изменить услугу\n\n"
         "⚙️ Настройки:\n"
         "/schedule — посмотреть текущий график работы\n"
-        "/set_schedule — изменить график работы\n"
-        "  (рабочие дни, время начала/конца, обед)\n\n"
+        "/set_schedule — изменить график работы\n\n"
         "👨‍🔧 Мастера:\n"
         "/masters — список мастеров и статусов\n"
+        "/master_invite [имя] — одноразовая ссылка для нового мастера (создаёт запись в БД по клику)\n"
+        "/master_bind &lt;key&gt; &lt;telegram_user_id&gt; — вручную привязать к существующей строке masters (тест/ремонт)\n"
+        "/master_unbind &lt;key&gt; — отвязать Telegram от мастера\n"
         "/master_on &lt;key&gt; — включить мастера\n"
         "/master_off &lt;key&gt; — выключить мастера\n"
-        "/master_hours &lt;key&gt; 10:00 18:00 — задать часы мастера\n\n"
-        "/master_branch_add &lt;key&gt; &lt;branch_id&gt; — закрепить мастера за филиалом\n"
-        "/master_branch_remove &lt;key&gt; &lt;branch_id&gt; — открепить мастера от филиала\n\n"
+        "/master_hours &lt;key&gt; 10:00 18:00 — задать часы мастера\n"
+        "/master_branch_add &lt;key&gt; &lt;branch_id&gt;\n"
+        "/master_branch_remove &lt;key&gt; &lt;branch_id&gt;\n\n"
         "🏬 Филиалы:\n"
         "/branches — список филиалов и статусов\n"
         "/branch_on &lt;id&gt; — включить филиал\n"
         "/branch_off &lt;id&gt; — выключить филиал\n\n"
         "❌ Выход:\n"
-        "/exit — выйти из админки\n"
-        "  и вернуться в режим клиента",
+        "/exit — закрыть админ-панель (роль admin сохраняется)",
         reply_markup=admin_menu_keyboard(),
     )
+
+
+@router.message(Command("master_invite"))
+async def admin_master_invite(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    me = await message.bot.get_me()
+    if not me.username:
+        await message.answer(
+            "У бота нет @username в Telegram. Задайте имя у @BotFather — без него deep-link не собрать."
+        )
+        return
+    raw = (message.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    hint = parts[1].strip() if len(parts) > 1 else None
+    _, url = await master_invite_service.create_invite_link(
+        admin_user_id=message.from_user.id,
+        bot_username=me.username,
+        hint_name=hint,
+    )
+    await message.answer(
+        "Одноразовая ссылка для нового мастера (действует 7 дней, одно использование):\n"
+        f"{url}\n\n"
+        "Мастер открывает ссылку → при первом входе проходит регистрацию → в базе создаётся "
+        "новая строка masters и выдаётся роль master.\n"
+        "Строки вроде ilya из миграций — мок для теста бронирования; реальных мастеров удобнее заводить через эту ссылку.\n"
+        f"Подсказка для себя (необязательно): {hint or '—'}"
+    )
+
+
+@router.message(Command("master_bind"))
+async def admin_master_bind(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 3:
+        await message.answer("Использование: /master_bind &lt;master_key&gt; &lt;telegram_user_id&gt;")
+        return
+    key = parts[1].strip()
+    try:
+        tid = int(parts[2].strip())
+    except ValueError:
+        await message.answer("telegram_user_id должен быть числом.")
+        return
+    target = await users_repo.get_by_user_id(tid)
+    if target is None:
+        await message.answer("Пользователь не найден. Пусть сначала нажмёт /start и поделится контактом.")
+        return
+    m = await masters_repo.get_by_key(key)
+    if m is None:
+        await message.answer("Мастер с таким ключом не найден.")
+        return
+    ok = await masters_repo.set_telegram_for_master_key(key, tid)
+    if not ok:
+        await message.answer("Не удалось записать привязку в базу.")
+        return
+    await users_repo.set_role(tid, ROLE_MASTER)
+    await message.answer(
+        f"Готово ✅ Мастер «{m.name}» ({key}) привязан к user_id {tid}. У пользователя роль master."
+    )
+
+
+@router.message(Command("master_unbind"))
+async def admin_master_unbind(message: Message, state: FSMContext) -> None:
+    if not await _is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+    if not await _ensure_admin_mode(message, state):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /master_unbind &lt;master_key&gt;")
+        return
+    key = parts[1].strip()
+    m = await masters_repo.get_by_key(key)
+    if m is None:
+        await message.answer("Мастер не найден.")
+        return
+    if m.telegram_user_id is None:
+        await message.answer("У этого мастера нет привязки к Telegram.")
+        return
+    tid = int(m.telegram_user_id)
+    ok = await masters_repo.set_telegram_for_master_key(key, None)
+    if not ok:
+        await message.answer("Не удалось обновить базу.")
+        return
+    linked_user = await users_repo.get_by_user_id(tid)
+    if linked_user is not None and is_master_role(linked_user.role):
+        await users_repo.set_role(tid, "client")
+    await message.answer(f"Привязка снята. Был user_id {tid}.")
 
 
 @router.message(Command("exit"))
 async def exit_admin_panel(message: Message, state: FSMContext) -> None:
     user = await users_repo.get_by_user_id(message.from_user.id)
-    if user is None or user.role != "admin":
+    if user is None or not is_admin_role(user.role):
         await state.clear()
-        await message.answer("Ты уже в обычном режиме.", reply_markup=main_menu_keyboard())
+        await message.answer(
+            "Команда /exit только для администраторов.",
+            reply_markup=menu_keyboard_for_role(user.role if user else None),
+        )
         return
     await _delete_tracked_admin_inline_message(message, state)
-    await users_repo.set_role(message.from_user.id, "client")
     await state.clear()
     await message.answer(
-        "Ты вышел из админ-панели.\nТеперь бот работает в обычном режиме 👋",
-        reply_markup=main_menu_keyboard(),
+        "Ты вышел из админ-панели команд. Главное меню ниже 👋",
+        reply_markup=menu_keyboard_for_role(user.role),
     )
 
 

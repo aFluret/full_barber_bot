@@ -27,7 +27,6 @@ class BookingStates(StatesGroup):
 
 
 class AdminPanelStates(StatesGroup):
-    waiting_access_code = State()
     in_menu = State()
 
 

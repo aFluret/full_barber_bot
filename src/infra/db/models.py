@@ -71,3 +71,4 @@ class MasterModel:
     work_start: time
     work_end: time
     is_active: bool = True
+    telegram_user_id: Optional[int] = None

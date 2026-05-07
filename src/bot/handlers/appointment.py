@@ -26,6 +26,8 @@ from src.bot.handlers.states import RescheduleStates
 from src.bot.keyboards.calendar import RU_MONTHS_NOM, WEEKDAY_LABELS, generate_calendar
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
 from src.infra.config.settings import get_settings
+from src.infra.auth import gather_admin_recipient_ids, is_admin_role, resolve_master_notify_chat_id
+from src.infra.db.repositories.masters_repository import MastersRepository
 from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.users_repository import UsersRepository
 
@@ -33,6 +35,7 @@ router = Router()
 booking_service = BookingService()
 services_repo = ServicesRepository()
 users_repo = UsersRepository()
+masters_repo = MastersRepository()
 RU_WEEKDAY_FULL = {
     0: "понедельник",
     1: "вторник",
@@ -65,56 +68,8 @@ def _render_template(template: str, values: dict[str, str]) -> str:
     return text
 
 
-def _parse_master_notify_map(raw: str) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for chunk in (raw or "").split(","):
-        pair = chunk.strip()
-        if not pair:
-            continue
-        sep = ":" if ":" in pair else ("=" if "=" in pair else None)
-        if sep is None:
-            continue
-        key_raw, user_id_raw = pair.split(sep, 1)
-        key = key_raw.strip()
-        if not key:
-            continue
-        try:
-            out[key] = int(user_id_raw.strip())
-        except ValueError:
-            continue
-    return out
-
-
-def _resolve_master_notify_chat_id(master_key: str | None) -> int | None:
-    key = (master_key or "").strip()
-    if not key:
-        return None
-    return _parse_master_notify_map(get_settings().master_telegram_map).get(key)
-
-
-def _parse_admin_user_ids(raw: str) -> list[int]:
-    out: list[int] = []
-    for chunk in (raw or "").split(","):
-        value = chunk.strip()
-        if not value:
-            continue
-        try:
-            out.append(int(value))
-        except ValueError:
-            continue
-    return out
-
-
-async def _admin_recipient_ids() -> list[int]:
-    ids = set(_parse_admin_user_ids(get_settings().admin_user_ids))
-    admins = await users_repo.list_admins()
-    for admin in admins:
-        ids.add(int(admin.user_id))
-    return sorted(ids)
-
-
 async def _notify_admins(bot, text: str) -> None:
-    recipient_ids = await _admin_recipient_ids()
+    recipient_ids = await gather_admin_recipient_ids(users_repo, get_settings().admin_user_ids)
     if not recipient_ids:
         return
     await asyncio.gather(
@@ -330,7 +285,11 @@ async def cancel_appointment_confirm(callback: CallbackQuery, state: FSMContext)
         },
     )
     await _notify_admins(callback.bot, admin_text)
-    master_chat_id = _resolve_master_notify_chat_id(appt.master_key)
+    master_chat_id = await resolve_master_notify_chat_id(
+        appt.master_key,
+        masters_repo=masters_repo,
+        settings=get_settings(),
+    )
     if master_chat_id:
         master_text = _render_template(
             get_settings().notify_master_cancelled_text,
@@ -776,7 +735,11 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
         },
     )
     await _notify_admins(callback.bot, admin_text)
-    master_chat_id = _resolve_master_notify_chat_id(new_appointment.master_key or master_key)
+    master_chat_id = await resolve_master_notify_chat_id(
+        new_appointment.master_key or master_key,
+        masters_repo=masters_repo,
+        settings=get_settings(),
+    )
     if master_chat_id:
         master_text = _render_template(
             get_settings().notify_master_rescheduled_text,
@@ -813,7 +776,7 @@ async def reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None
 @router.message(Command("no_show"))
 async def mark_no_show(message: Message) -> None:
     user = await users_repo.get_by_user_id(message.from_user.id)
-    if user is None or user.role != "admin":
+    if user is None or not is_admin_role(user.role):
         await message.answer("Недостаточно прав.")
         return
     parts = (message.text or "").strip().split()
@@ -852,7 +815,11 @@ async def mark_no_show(message: Message) -> None:
             )
         except Exception:
             pass
-    master_chat_id = _resolve_master_notify_chat_id(appt.master_key)
+    master_chat_id = await resolve_master_notify_chat_id(
+        appt.master_key,
+        masters_repo=masters_repo,
+        settings=get_settings(),
+    )
     if master_chat_id:
         try:
             await message.bot.send_message(

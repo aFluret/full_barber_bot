@@ -42,6 +42,7 @@ from src.bot.keyboards.booking import (
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.keyboards.calendar import build_calendar_keyboard
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
+from src.infra.auth import gather_admin_recipient_ids, resolve_master_notify_chat_id
 from src.infra.config.settings import get_settings
 
 router = Router()
@@ -161,55 +162,6 @@ def _format_duration(minutes: int) -> str:
     if rest == 0:
         return f"{hours} ч"
     return f"{hours} ч {rest} мин"
-
-
-def _parse_master_notify_map(raw: str) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for chunk in (raw or "").split(","):
-        pair = chunk.strip()
-        if not pair:
-            continue
-        sep = ":" if ":" in pair else ("=" if "=" in pair else None)
-        if sep is None:
-            continue
-        key_raw, user_id_raw = pair.split(sep, 1)
-        key = key_raw.strip()
-        if not key:
-            continue
-        try:
-            out[key] = int(user_id_raw.strip())
-        except ValueError:
-            continue
-    return out
-
-
-def _resolve_master_notify_chat_id(master_key: str | None) -> int | None:
-    key = (master_key or "").strip()
-    if not key:
-        return None
-    mapping = _parse_master_notify_map(get_settings().master_telegram_map)
-    return mapping.get(key)
-
-
-def _parse_admin_user_ids(raw: str) -> list[int]:
-    out: list[int] = []
-    for chunk in (raw or "").split(","):
-        value = chunk.strip()
-        if not value:
-            continue
-        try:
-            out.append(int(value))
-        except ValueError:
-            continue
-    return out
-
-
-async def _admin_recipient_ids() -> list[int]:
-    ids = set(_parse_admin_user_ids(get_settings().admin_user_ids))
-    admins = await users_repo.list_admins()
-    for admin in admins:
-        ids.add(int(admin.user_id))
-    return sorted(ids)
 
 
 async def _build_booking_confirm_text(
@@ -611,10 +563,12 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.delete()
     except Exception:
         pass
+    user = await booking_service.get_user(callback.from_user.id)
+    role = user.role if user else None
     await callback.bot.send_message(
         chat_id=callback.message.chat.id,
         text="Выберите действие в меню ниже.",
-        reply_markup=menu_keyboard_for_role("client"),
+        reply_markup=menu_keyboard_for_role(role),
     )
     await safe_callback_answer(callback)
 
@@ -1221,7 +1175,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     service_duration = service.duration_minutes if service is not None else 0
 
     # Уведомляем администраторов сразу после успешного подтверждения записи.
-    admin_ids = await _admin_recipient_ids()
+    admin_ids = await gather_admin_recipient_ids(users_repo, get_settings().admin_user_ids)
     if admin_ids and user is not None:
         notify_text = _render_template(
             get_settings().notify_admin_created_text,
@@ -1244,7 +1198,11 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             return_exceptions=True,
         )
 
-    master_chat_id = _resolve_master_notify_chat_id(booking_master_key)
+    master_chat_id = await resolve_master_notify_chat_id(
+        booking_master_key,
+        masters_repo=masters_repo,
+        settings=get_settings(),
+    )
     if master_chat_id:
         master_notify_text = _render_template(
             get_settings().notify_master_created_text,

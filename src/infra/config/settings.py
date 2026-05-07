@@ -131,6 +131,8 @@ class Settings(BaseSettings):
     branches_csv: str = "Основной филиал"
     masters_csv: str = "Илья"
     enable_any_master_option: bool = True
+    # Неиспользуется кодом: можно держать список id для документирования bootstrap (роль admin в БД).
+    admin_bootstrap_user_ids: str = ""
     # Формат: "ilya:123456789,maksim:987654321" (master_key -> telegram user_id мастера)
     master_telegram_map: str = ""
 

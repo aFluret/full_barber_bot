@@ -18,11 +18,28 @@ from src.infra.db.models import MasterModel
 from src.infra.db.supabase_client import get_supabase_client
 
 
+_SELECT = "id,master_key,name,work_start,work_end,is_active,telegram_user_id"
+
+
 class MastersRepository:
     @staticmethod
     def _parse_time(raw: object, default_hhmm: str) -> time:
         s = str(raw)[:5] if raw is not None else default_hhmm
         return datetime.strptime(s, "%H:%M").time()
+
+    @classmethod
+    def _row_to_model(cls, row: dict) -> MasterModel:
+        tid = row.get("telegram_user_id")
+        telegram_user_id = int(tid) if tid is not None else None
+        return MasterModel(
+            id=int(row["id"]),
+            master_key=str(row.get("master_key") or f"m{int(row['id'])}"),
+            name=str(row.get("name") or ""),
+            work_start=cls._parse_time(row.get("work_start"), "10:00"),
+            work_end=cls._parse_time(row.get("work_end"), "18:00"),
+            is_active=bool(row.get("is_active", True)),
+            telegram_user_id=telegram_user_id,
+        )
 
     def _fallback(self) -> List[MasterModel]:
         settings = get_settings()
@@ -37,9 +54,119 @@ class MastersRepository:
                     work_start=time(10, 0),
                     work_end=time(18, 0),
                     is_active=True,
+                    telegram_user_id=None,
                 )
             )
         return out
+
+    async def get_by_key(self, master_key: str) -> Optional[MasterModel]:
+        key = (master_key or "").strip()
+        if not key:
+            return None
+
+        def _op() -> Optional[dict]:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("masters")
+                    .select(_SELECT)
+                    .eq("master_key", key)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception:
+                return None
+            return res.data[0] if res.data else None
+
+        row = await asyncio.to_thread(_op)
+        if not row:
+            return None
+        return self._row_to_model(row)
+
+    async def get_by_telegram_user_id(self, telegram_user_id: int) -> Optional[MasterModel]:
+        def _op() -> Optional[dict]:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("masters")
+                    .select(_SELECT)
+                    .eq("telegram_user_id", int(telegram_user_id))
+                    .limit(1)
+                    .execute()
+                )
+            except Exception:
+                return None
+            return res.data[0] if res.data else None
+
+        row = await asyncio.to_thread(_op)
+        if not row:
+            return None
+        return self._row_to_model(row)
+
+    async def set_telegram_for_master_key(self, master_key: str, telegram_user_id: int | None) -> bool:
+        key = (master_key or "").strip()
+        if not key:
+            return False
+
+        def _op() -> bool:
+            client = get_supabase_client()
+            try:
+                if telegram_user_id is not None:
+                    client.table("masters").update({"telegram_user_id": None}).eq(
+                        "telegram_user_id", int(telegram_user_id)
+                    ).execute()
+                res = (
+                    client.table("masters")
+                    .update({"telegram_user_id": telegram_user_id})
+                    .eq("master_key", key)
+                    .execute()
+                )
+                return bool(res.data)
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_op)
+
+    async def insert_master(
+        self,
+        *,
+        master_key: str,
+        name: str,
+        telegram_user_id: int,
+        work_start: time | None = None,
+        work_end: time | None = None,
+    ) -> Optional[MasterModel]:
+        ws = work_start or time(10, 0)
+        we = work_end or time(18, 0)
+        key = (master_key or "").strip()
+        if not key:
+            return None
+
+        def _op() -> Optional[dict]:
+            client = get_supabase_client()
+            try:
+                client.table("masters").update({"telegram_user_id": None}).eq(
+                    "telegram_user_id", int(telegram_user_id)
+                ).execute()
+                res = client.table("masters").insert(
+                    {
+                        "master_key": key,
+                        "name": name.strip() or key,
+                        "work_start": ws.strftime("%H:%M:%S"),
+                        "work_end": we.strftime("%H:%M:%S"),
+                        "is_active": True,
+                        "telegram_user_id": int(telegram_user_id),
+                    }
+                ).execute()
+                row = (res.data or [None])[0]
+                return row
+            except Exception:
+                return None
+
+        row = await asyncio.to_thread(_op)
+        if not row:
+            return None
+        return self._row_to_model(row)
 
     async def list_active(self, branch_id: Optional[int] = None) -> List[MasterModel]:
         def _op() -> List[MasterModel]:
@@ -47,11 +174,10 @@ class MastersRepository:
             try:
                 query = (
                     client.table("masters")
-                    .select("id,master_key,name,work_start,work_end,is_active")
+                    .select(_SELECT)
                     .eq("is_active", True)
                 )
                 if branch_id is not None:
-                    # Получаем id мастеров для филиала.
                     rel = (
                         client.table("master_branches")
                         .select("master_id")
@@ -70,19 +196,7 @@ class MastersRepository:
             rows = list(res.data or [])
             if not rows:
                 return self._fallback() if branch_id is None else []
-            out: List[MasterModel] = []
-            for row in rows:
-                out.append(
-                    MasterModel(
-                        id=int(row["id"]),
-                        master_key=str(row.get("master_key") or f"m{int(row['id'])}"),
-                        name=str(row.get("name") or ""),
-                        work_start=self._parse_time(row.get("work_start"), "10:00"),
-                        work_end=self._parse_time(row.get("work_end"), "18:00"),
-                        is_active=bool(row.get("is_active", True)),
-                    )
-                )
-            return out
+            return [self._row_to_model(row) for row in rows]
 
         return await asyncio.to_thread(_op)
 
@@ -90,9 +204,7 @@ class MastersRepository:
         def _op() -> List[MasterModel]:
             client = get_supabase_client()
             try:
-                query = client.table("masters").select(
-                    "id,master_key,name,work_start,work_end,is_active"
-                )
+                query = client.table("masters").select(_SELECT)
                 if branch_id is not None:
                     rel = (
                         client.table("master_branches")
@@ -111,28 +223,9 @@ class MastersRepository:
             rows = list(res.data or [])
             if not rows:
                 return self._fallback() if branch_id is None else []
-            out: List[MasterModel] = []
-            for row in rows:
-                out.append(
-                    MasterModel(
-                        id=int(row["id"]),
-                        master_key=str(row.get("master_key") or f"m{int(row['id'])}"),
-                        name=str(row.get("name") or ""),
-                        work_start=self._parse_time(row.get("work_start"), "10:00"),
-                        work_end=self._parse_time(row.get("work_end"), "18:00"),
-                        is_active=bool(row.get("is_active", True)),
-                    )
-                )
-            return out
+            return [self._row_to_model(row) for row in rows]
 
         return await asyncio.to_thread(_op)
-
-    async def get_by_key(self, master_key: str) -> Optional[MasterModel]:
-        all_items = await self.list_all()
-        for item in all_items:
-            if item.master_key == master_key:
-                return item
-        return None
 
     async def set_active(self, master_key: str, is_active: bool) -> bool:
         def _op() -> bool:

@@ -355,6 +355,47 @@ class AppointmentsRepository:
         rows = await asyncio.to_thread(_op)
         return [self._to_model(row) for row in rows]
 
+    async def list_by_date_for_master(self, target_date: date, master_id: int) -> List[AppointmentModel]:
+        def _op() -> List[dict]:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .eq("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .eq("master_id", int(master_id))
+                    .order("start_time")
+                    .execute()
+                )
+                return list(res.data or [])
+            except Exception:
+                return []
+
+        rows = await asyncio.to_thread(_op)
+        return [self._to_model(row) for row in rows]
+
+    async def list_confirmed_from_date_for_master(self, target_date: date, master_id: int) -> List[AppointmentModel]:
+        def _op() -> List[dict]:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("appointments")
+                    .select(self.EXT_SELECT)
+                    .gte("date", target_date.isoformat())
+                    .eq("status", "confirmed")
+                    .eq("master_id", int(master_id))
+                    .order("date")
+                    .order("start_time")
+                    .execute()
+                )
+                return list(res.data or [])
+            except Exception:
+                return []
+
+        rows = await asyncio.to_thread(_op)
+        return [self._to_model(row) for row in rows]
+
     async def list_confirmed_from_date(self, target_date: date) -> List[AppointmentModel]:
         # используется для команды /all (все будущие записи)
         def _op() -> List[dict]:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import List, Optional
 
+from src.infra.auth.roles import ROLE_ADMIN, normalize_role
 from src.infra.db.models import UserModel
 from src.infra.db.supabase_client import get_supabase_client
 from datetime import datetime
@@ -44,7 +45,7 @@ class UsersRepository:
             user_id=int(row["user_id"]),
             phone=str(row["phone"]),
             name=str(row["name"]),
-            role=str(row.get("role") or "client"),
+            role=normalize_role(row.get("role")),
             created_at=created_at_dt,
         )
 
@@ -61,9 +62,11 @@ class UsersRepository:
         await asyncio.to_thread(_op)
 
     async def set_role(self, user_id: int, role: str) -> None:
+        normalized = normalize_role(role)
+
         def _op() -> None:
             client = get_supabase_client()
-            client.table("users").update({"role": role}).eq("user_id", user_id).execute()
+            client.table("users").update({"role": normalized}).eq("user_id", user_id).execute()
 
         await asyncio.to_thread(_op)
 
@@ -73,7 +76,7 @@ class UsersRepository:
             res = (
                 client.table("users")
                 .select("user_id, phone, name, role, created_at")
-                .eq("role", "admin")
+                .eq("role", ROLE_ADMIN)
                 .execute()
             )
             return list(res.data or [])
@@ -91,7 +94,7 @@ class UsersRepository:
                     user_id=int(row["user_id"]),
                     phone=str(row.get("phone") or ""),
                     name=str(row.get("name") or ""),
-                    role=str(row.get("role") or "client"),
+                    role=normalize_role(row.get("role")),
                     created_at=created_at_dt,
                 )
             )

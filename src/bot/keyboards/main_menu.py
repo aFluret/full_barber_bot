@@ -9,6 +9,8 @@
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
+from src.infra.auth.roles import ROLE_ADMIN, ROLE_MASTER, normalize_role
+
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -16,6 +18,18 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📅 Записаться")],
             [KeyboardButton(text="📚 Мои записи"), KeyboardButton(text="🔄 Перенести запись")],
             [KeyboardButton(text="❌ Отменить запись")],
+            [KeyboardButton(text="📍 Контакты"), KeyboardButton(text="💬 Связаться с админом")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def master_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Ко мне сегодня"), KeyboardButton(text="📋 Ко мне завтра")],
+            [KeyboardButton(text="📆 Все записи ко мне")],
+            [KeyboardButton(text="⏰ Мои рабочие часы")],
             [KeyboardButton(text="📍 Контакты"), KeyboardButton(text="💬 Связаться с админом")],
         ],
         resize_keyboard=True,
@@ -38,6 +52,9 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def menu_keyboard_for_role(role: str | None) -> ReplyKeyboardMarkup:
-    if (role or "").strip().lower() == "admin":
+    r = normalize_role(role)
+    if r == ROLE_ADMIN:
         return admin_menu_keyboard()
+    if r == ROLE_MASTER:
+        return master_menu_keyboard()
     return main_menu_keyboard()
