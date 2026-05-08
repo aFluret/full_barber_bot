@@ -32,7 +32,20 @@ from src.app.services.master_invite_service import MasterInviteService
 from src.infra.db.models import ServiceModel
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
-from src.bot.keyboards.main_menu import admin_menu_keyboard, menu_keyboard_for_role
+from src.bot.keyboards.main_menu import (
+    ADMIN_KB_ALL,
+    ADMIN_KB_BRANCHES,
+    ADMIN_KB_MASTER_LOAD,
+    ADMIN_KB_MASTERS,
+    ADMIN_KB_SCHEDULE,
+    ADMIN_KB_SERVICES,
+    ADMIN_KB_SET_SCHEDULE,
+    ADMIN_KB_STATS,
+    ADMIN_KB_TODAY,
+    ADMIN_KB_TOMORROW,
+    admin_menu_keyboard,
+    menu_keyboard_for_role,
+)
 from src.infra.auth import ROLE_MASTER, is_admin_role, is_master_role
 
 router = Router()
@@ -206,6 +219,7 @@ async def _master_load_report_text() -> str:
 
 
 @router.message(Command("today"))
+@router.message(F.text == ADMIN_KB_TODAY)
 async def today_appointments(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -217,6 +231,7 @@ async def today_appointments(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("tomorrow"))
+@router.message(F.text == ADMIN_KB_TOMORROW)
 async def tomorrow_appointments(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -228,6 +243,7 @@ async def tomorrow_appointments(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("all"))
+@router.message(F.text == ADMIN_KB_ALL)
 async def all_future_appointments(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -270,6 +286,7 @@ async def all_future_appointments(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("services"))
+@router.message(F.text == ADMIN_KB_SERVICES)
 async def admin_services_list(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -326,6 +343,7 @@ async def admin_service_set(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("stats"))
+@router.message(F.text == ADMIN_KB_STATS)
 async def admin_stats(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -337,6 +355,7 @@ async def admin_stats(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("master_load"))
+@router.message(F.text == ADMIN_KB_MASTER_LOAD)
 async def admin_master_load(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -466,6 +485,7 @@ async def _branches_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup
 
 
 @router.message(Command("masters"))
+@router.message(F.text == ADMIN_KB_MASTERS)
 async def admin_masters_list(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -579,6 +599,7 @@ async def admin_master_branch_remove(message: Message, state: FSMContext) -> Non
 
 
 @router.message(Command("branches"))
+@router.message(F.text == ADMIN_KB_BRANCHES)
 async def admin_branches_list(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -783,6 +804,7 @@ async def admin_branch_toggle(callback: CallbackQuery, state: FSMContext) -> Non
 
 
 @router.message(Command("schedule"))
+@router.message(F.text == ADMIN_KB_SCHEDULE)
 async def show_work_schedule(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -930,6 +952,7 @@ async def _send_or_replace_schedule_panel(message: Message, state: FSMContext, t
 
 
 @router.message(Command("set_schedule"))
+@router.message(F.text == ADMIN_KB_SET_SCHEDULE)
 async def set_work_schedule(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
         await message.answer("Недостаточно прав.")
@@ -1013,7 +1036,8 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminPanelStates.in_menu)
     await message.answer(
         f"Привет, {user.name}! 👋\n"
-        "Ты в админ-панели.\n\n"
+        "Ты в админ-панели.\n"
+        "Внизу — кнопки с основными действиями (как у других ролей). Ниже — полный список команд для точных операций.\n\n"
         "📋 Записи:\n"
         "/today — записи на сегодня\n"
         "/tomorrow — записи на завтра\n"
@@ -1041,9 +1065,7 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
         "🏬 Филиалы:\n"
         "/branches — список филиалов и статусов\n"
         "/branch_on &lt;id&gt; — включить филиал\n"
-        "/branch_off &lt;id&gt; — выключить филиал\n\n"
-        "❌ Выход:\n"
-        "/exit — закрыть админ-панель (роль admin сохраняется)",
+        "/branch_off &lt;id&gt; — выключить филиал",
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -1172,30 +1194,11 @@ async def admin_master_unbind(message: Message, state: FSMContext) -> None:
     await message.answer(f"Привязка снята. Был user_id {tid}.")
 
 
-@router.message(Command("exit"))
-async def exit_admin_panel(message: Message, state: FSMContext) -> None:
-    user = await users_repo.get_by_user_id(message.from_user.id)
-    if user is None or not is_admin_role(user.role):
-        await state.clear()
-        await message.answer(
-            "Команда /exit только для администраторов.",
-            reply_markup=menu_keyboard_for_role(user.role if user else None),
-        )
-        return
-    await _delete_tracked_admin_inline_message(message, state)
-    await state.clear()
-    await message.answer(
-        "Ты вышел из админ-панели команд. Главное меню ниже 👋",
-        reply_markup=menu_keyboard_for_role(user.role),
-    )
-
-
 @router.message(AdminPanelStates.in_menu)
 async def admin_panel_fallback(message: Message) -> None:
     await message.answer(
         "Ты в админ-панели.\n"
-        "Используй команды из списка.\n"
-        "Напиши /exit чтобы выйти."
+        "Используй кнопки меню или команды из подсказки при входе (/admin)."
     )
 
 

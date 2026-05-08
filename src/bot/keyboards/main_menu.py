@@ -11,6 +11,18 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 from src.infra.auth.roles import ROLE_ADMIN, ROLE_MASTER, normalize_role
 
+# Тексты кнопок админ-меню (синхронизировать с фильтрами F.text в admin.py)
+ADMIN_KB_TODAY = "📋 Записи сегодня"
+ADMIN_KB_TOMORROW = "📋 Записи завтра"
+ADMIN_KB_ALL = "📚 Все будущие записи"
+ADMIN_KB_STATS = "📊 Статистика"
+ADMIN_KB_MASTER_LOAD = "📈 Загрузка мастеров"
+ADMIN_KB_SERVICES = "🛠️ Услуги"
+ADMIN_KB_SCHEDULE = "⏰ Текущий график"
+ADMIN_KB_SET_SCHEDULE = "📆 Изменить график"
+ADMIN_KB_MASTERS = "👨‍🔧 Мастера"
+ADMIN_KB_BRANCHES = "🏢 Филиалы"
+
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -39,13 +51,13 @@ def master_menu_keyboard() -> ReplyKeyboardMarkup:
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="/today"), KeyboardButton(text="/tomorrow")],
-            [KeyboardButton(text="/all")],
-            [KeyboardButton(text="/stats"), KeyboardButton(text="/master_load")],
-            [KeyboardButton(text="/services")],
-            [KeyboardButton(text="/schedule"), KeyboardButton(text="/set_schedule")],
-            [KeyboardButton(text="/masters"), KeyboardButton(text="/branches")],
-            [KeyboardButton(text="/exit")],
+            [KeyboardButton(text=ADMIN_KB_TODAY), KeyboardButton(text=ADMIN_KB_TOMORROW)],
+            [KeyboardButton(text=ADMIN_KB_ALL)],
+            [KeyboardButton(text=ADMIN_KB_STATS), KeyboardButton(text=ADMIN_KB_MASTER_LOAD)],
+            [KeyboardButton(text=ADMIN_KB_SERVICES)],
+            [KeyboardButton(text=ADMIN_KB_SCHEDULE), KeyboardButton(text=ADMIN_KB_SET_SCHEDULE)],
+            [KeyboardButton(text=ADMIN_KB_MASTERS), KeyboardButton(text=ADMIN_KB_BRANCHES)],
+            [KeyboardButton(text="📍 Контакты"), KeyboardButton(text="💬 Связаться с админом")],
         ],
         resize_keyboard=True,
     )
