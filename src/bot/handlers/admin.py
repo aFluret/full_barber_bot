@@ -1817,7 +1817,7 @@ async def monthly_select_mode(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_week:"))
 async def monthly_pick_week(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, week_s = callback.data.split(":")
+    _, _, ym, week_s = callback.data.split(":", 3)
     y_s, m_s = ym.split("-")
     year, month, week_number = int(y_s), int(m_s), int(week_s)
     await state.set_state(AdminScheduleStates.waiting_day_pick)
@@ -1832,7 +1832,7 @@ async def monthly_pick_week(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_date:"))
 async def monthly_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, date_iso = callback.data.split(":")
+    _, _, ym, date_iso = callback.data.split(":", 3)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     picked = date.fromisoformat(date_iso)
@@ -1849,7 +1849,7 @@ async def monthly_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_weekday:"))
 async def monthly_pick_weekday(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, weekday_s = callback.data.split(":")
+    _, _, ym, weekday_s = callback.data.split(":", 3)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     day_key = _weekday_key_by_num(int(weekday_s))
@@ -1865,7 +1865,7 @@ async def monthly_pick_weekday(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:work_no:"))
 async def monthly_day_off(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key = callback.data.split(":")
+    _, _, ym, day_key = callback.data.split(":", 3)
     data = await state.get_data()
     draft = dict(data.get("monthly_draft") or {})
     draft[day_key] = {"is_day_off": True}
@@ -1880,7 +1880,7 @@ async def monthly_day_off(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:work_yes:"))
 async def monthly_day_work_yes(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key = callback.data.split(":")
+    _, _, ym, day_key = callback.data.split(":", 3)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     await state.set_state(AdminScheduleStates.waiting_start_time)
@@ -1895,7 +1895,7 @@ async def monthly_day_work_yes(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_start:"))
 async def monthly_set_start(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key, start_hhmm = callback.data.split(":")
+    _, _, ym, day_key, start_hhmm = callback.data.split(":", 4)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
@@ -1916,7 +1916,7 @@ async def monthly_set_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_end:"))
 async def monthly_set_end(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key, end_hhmm = callback.data.split(":")
+    _, _, ym, day_key, end_hhmm = callback.data.split(":", 4)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
@@ -1941,7 +1941,7 @@ async def monthly_set_end(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_lunch_start:"))
 async def monthly_set_lunch_start(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key, lunch_start = callback.data.split(":")
+    _, _, ym, day_key, lunch_start = callback.data.split(":", 4)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
@@ -1963,7 +1963,7 @@ async def monthly_set_lunch_start(callback: CallbackQuery, state: FSMContext) ->
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_lunch_end:"))
 async def monthly_set_lunch_end(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, day_key, lunch_end = callback.data.split(":")
+    _, _, ym, day_key, lunch_end = callback.data.split(":", 4)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
@@ -2025,7 +2025,7 @@ def _to_weeks_payload(year: int, month: int, draft: dict[str, Any]) -> dict[str,
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:day_done:"))
 async def monthly_day_done(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym, _day_key = callback.data.split(":")
+    _, _, ym, _day_key = callback.data.split(":", 3)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
@@ -2082,14 +2082,25 @@ async def monthly_back_pick_day(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:save_month:"))
 async def monthly_save_month(callback: CallbackQuery, state: FSMContext) -> None:
-    _, _, _, ym = callback.data.split(":")
+    _, _, ym = callback.data.split(":", 2)
     y_s, m_s = ym.split("-")
     year, month = int(y_s), int(m_s)
     data = await state.get_data()
     draft = dict(data.get("monthly_draft") or {})
     mode = str(data.get("monthly_mode") or "full_month")
     payload = _to_weekly_payload(draft) if mode == "full_month" else _to_weeks_payload(year, month, draft)
-    await work_schedule_repo.upsert_month_schedule(_month_key(year, month), mode, payload)
+    try:
+        await work_schedule_repo.upsert_month_schedule(_month_key(year, month), mode, payload)
+    except Exception as e:
+        err = str(e)
+        hint = (
+            "\n\nЕсли в ошибке фигурирует PGRST205 / missing table — выполни в Supabase SQL из файла "
+            "`db/migrations/20260512_work_schedule_monthly.sql`."
+        )
+        if "PGRST205" in err or "work_schedule_monthly" in err:
+            err = err + hint
+        await safe_callback_answer(callback, f"❌ Не удалось сохранить график: {err}", show_alert=True)
+        return
     await state.set_state(AdminPanelStates.in_menu)
     await _safe_edit_admin_panel(
         callback,

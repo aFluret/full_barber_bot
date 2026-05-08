@@ -16,7 +16,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from src.app.services.booking_service import BookingService
 from src.app.services.master_invite_service import MasterInviteService
-from src.infra.auth.roles import ROLE_MASTER
+from src.infra.auth.roles import ROLE_ADMIN, ROLE_MASTER, normalize_role
 from src.bot.handlers.states import RegistrationStates
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
 
@@ -25,6 +25,19 @@ booking_service = BookingService()
 invite_service = MasterInviteService()
 
 PENDING_INVITE_KEY = "pending_master_invite_token"
+
+
+def _greeting_returning_user(name: str, role: str) -> str:
+    r = normalize_role(role)
+    if r == ROLE_ADMIN:
+        return (
+            f"Привет, {name} 👋\nТы вошёл как администратор.\nВыбери действие в меню ниже."
+        )
+    if r == ROLE_MASTER:
+        return (
+            f"Привет, {name} 👋\nТы в кабинете мастера.\nВыбери действие в меню ниже."
+        )
+    return f"Привет, {name} 👋\nБарбер Илья на связи.\nВыбери действие в меню ниже."
 
 
 def _redeem_error_ru(code: str) -> str:
@@ -81,7 +94,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
             await state.clear()
             return
         await message.answer(
-            f"Привет, {existing.name} 👋\nБарбер Илья на связи.\nВыбери действие в меню ниже.",
+            _greeting_returning_user(existing.name, existing.role),
             reply_markup=menu_keyboard_for_role(existing.role),
         )
         await state.clear()
