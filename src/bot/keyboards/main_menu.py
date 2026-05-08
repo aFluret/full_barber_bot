@@ -57,7 +57,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=ADMIN_KB_SERVICES)],
             [KeyboardButton(text=ADMIN_KB_SCHEDULE), KeyboardButton(text=ADMIN_KB_SET_SCHEDULE)],
             [KeyboardButton(text=ADMIN_KB_MASTERS), KeyboardButton(text=ADMIN_KB_BRANCHES)],
-            [KeyboardButton(text="📍 Контакты"), KeyboardButton(text="💬 Связаться с админом")],
+            [KeyboardButton(text="📍 Контакты")],
         ],
         resize_keyboard=True,
     )
