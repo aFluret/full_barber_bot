@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     bot_token: str = "CHANGE_ME"
     admin_user_ids: str = ""
-    # Код доступа для отдельной админ-панели по команде /admin.
+    # Код доступа для отдельной админ-панели (если используется в сценарии входа). Справка по командам: /help.
     # Должен быть строкой, чтобы поддерживать любые значения (в т.ч. с ведущими нулями).
     admin_panel_access_code: str = "1111"
     supabase_url: str = ""

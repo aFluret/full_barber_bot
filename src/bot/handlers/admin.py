@@ -35,6 +35,7 @@ from src.bot.handlers.states import AdminPanelStates, AdminScheduleStates
 from src.bot.keyboards.main_menu import (
     ADMIN_KB_ALL,
     ADMIN_KB_BRANCHES,
+    ADMIN_KB_HELP,
     ADMIN_KB_MASTER_LOAD,
     ADMIN_KB_MASTERS,
     ADMIN_KB_SCHEDULE,
@@ -80,7 +81,7 @@ async def _is_admin(user_id: int) -> bool:
 
 
 async def _ensure_admin_mode(message: Message, state: FSMContext) -> bool:
-    """Админ-меню показывается по роли админ может не вызывать /admin — переводим в панель по первому действию."""
+    """Админ-меню по роли: первое действие переводит FSM в панель (/help не обязателен)."""
     await state.set_state(AdminPanelStates.in_menu)
     return True
 
@@ -1022,7 +1023,8 @@ async def set_work_schedule(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Command("admin"))
+@router.message(Command("help"))
+@router.message(F.text == ADMIN_KB_HELP)
 async def admin_panel_entry(message: Message, state: FSMContext) -> None:
     await _delete_tracked_admin_inline_message(message, state)
     if not await _is_admin(message.from_user.id):
@@ -1035,7 +1037,7 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminPanelStates.in_menu)
     await message.answer(
         f"Привет, {user.name}! 👋\n"
-        "Ты в админ-панели.\n"
+        "Ты в админ-панели. Подсказка по командам — в этом сообщении или команда /help.\n"
         "Внизу — кнопки с основными действиями (как у других ролей). Ниже — полный список команд для точных операций.\n\n"
         "📋 Записи:\n"
         "/today — записи на сегодня\n"
@@ -1197,7 +1199,7 @@ async def admin_master_unbind(message: Message, state: FSMContext) -> None:
 async def admin_panel_fallback(message: Message) -> None:
     await message.answer(
         "Ты в админ-панели.\n"
-        "Используй кнопки меню или команды из подсказки при входе (/admin)."
+        "Используй кнопки меню, или отправь /help, или нажми «Помощь» для списка команд."
     )
 
 

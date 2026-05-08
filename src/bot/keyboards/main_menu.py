@@ -22,6 +22,7 @@ ADMIN_KB_SCHEDULE = "⏰ Текущий график"
 ADMIN_KB_SET_SCHEDULE = "📆 Изменить график"
 ADMIN_KB_MASTERS = "👨‍🔧 Мастера"
 ADMIN_KB_BRANCHES = "🏢 Филиалы"
+ADMIN_KB_HELP = "Помощь"
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -57,7 +58,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=ADMIN_KB_SERVICES)],
             [KeyboardButton(text=ADMIN_KB_SCHEDULE), KeyboardButton(text=ADMIN_KB_SET_SCHEDULE)],
             [KeyboardButton(text=ADMIN_KB_MASTERS), KeyboardButton(text=ADMIN_KB_BRANCHES)],
-            [KeyboardButton(text="📍 Контакты")],
+            [KeyboardButton(text="📍 Контакты"), KeyboardButton(text=ADMIN_KB_HELP)],
         ],
         resize_keyboard=True,
     )

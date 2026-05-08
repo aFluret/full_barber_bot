@@ -17,13 +17,13 @@
       "admin_inline_message_id": null
     }
   },
-  "8663335192:424666580:424666580:0::default": {
+  "8663335192:1006705298:1006705298:0::default": {
     "state": "AdminPanelStates:in_menu",
     "data": {
       "admin_inline_message_id": null
     }
   },
-  "8663335192:1006705298:1006705298:0::default": {
+  "8663335192:424666580:424666580:0::default": {
     "state": "AdminPanelStates:in_menu",
     "data": {
       "admin_inline_message_id": null
