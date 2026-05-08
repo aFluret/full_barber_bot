@@ -43,14 +43,14 @@ class MasterInviteService:
         admin_user_id: int,
         bot_username: str,
         hint_name: str | None = None,
-        ttl_days: int = 7,
+        ttl_minutes: int = 15,
     ) -> tuple[str, str]:
         token = self.generate_token()
         await self._invites.create_invite(
             token=token,
             created_by_user_id=admin_user_id,
             hint_name=hint_name,
-            ttl_days=ttl_days,
+            ttl_minutes=ttl_minutes,
         )
         payload = self.deep_link_payload(token)
         user = bot_username.strip().lstrip("@")

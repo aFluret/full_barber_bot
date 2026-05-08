@@ -9,6 +9,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -135,6 +136,8 @@ class Settings(BaseSettings):
     admin_bootstrap_user_ids: str = ""
     # Формат: "ilya:123456789,maksim:987654321" (master_key -> telegram user_id мастера)
     master_telegram_map: str = ""
+    # Срок действия ссылки /master_invite (минуты). Переменная окружения: MASTER_INVITE_TTL_MINUTES.
+    master_invite_ttl_minutes: int = Field(default=15, ge=1, le=10080)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

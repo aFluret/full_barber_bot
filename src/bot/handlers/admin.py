@@ -408,7 +408,7 @@ async def _masters_panel_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]
             ]
         )
 
-    lines.append("\nОсновной онбординг: /master_invite — одноразовая ссылка для нового мастера.")
+    lines.append("\nОсновной онбординг: /master_invite — одноразовая  ссылка для нового мастера.")
     lines.append("Вручную к тестовой строке masters: /master_bind (моки ilya и др. только для проверки записи).")
     lines.append("\nДля точного времени: /master_hours &lt;master_key&gt; &lt;HH:MM&gt; &lt;HH:MM&gt;")
     lines.append("Привязка филиалов: /master_branch_add &lt;master_key&gt; &lt;branch_id&gt;")
@@ -1030,7 +1030,7 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
         "/set_schedule — изменить график работы\n\n"
         "👨‍🔧 Мастера:\n"
         "/masters — список мастеров и статусов\n"
-        "/master_invite [имя] — одноразовая ссылка для нового мастера (создаёт запись в БД по клику)\n"
+        "/master_invite [подсказка] [минуты] — одноразовая ссылка для нового мастера\n"
         "/master_bind &lt;key&gt; &lt;telegram_user_id&gt; — вручную привязать к существующей строке masters (тест/ремонт)\n"
         "/master_unbind &lt;key&gt; — отвязать Telegram от мастера\n"
         "/master_on &lt;key&gt; — включить мастера\n"
@@ -1048,6 +1048,26 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
     )
 
 
+def _parse_master_invite_command_args(raw: str, *, default_ttl_minutes: int) -> tuple[str | None, int]:
+    """Число в конце — срок в минутах: /master_invite 30, /master_invite Иван 60."""
+    parts = raw.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None, default_ttl_minutes
+    rest = parts[1].strip()
+    if not rest:
+        return None, default_ttl_minutes
+    chunks = rest.rsplit(maxsplit=1)
+    if len(chunks) == 2:
+        last = chunks[1].strip()
+        if last.isdigit():
+            ttl = max(1, min(10080, int(last)))
+            hint = chunks[0].strip() or None
+            return hint, ttl
+    if rest.isdigit():
+        return None, max(1, min(10080, int(rest)))
+    return rest, default_ttl_minutes
+
+
 @router.message(Command("master_invite"))
 async def admin_master_invite(message: Message, state: FSMContext) -> None:
     if not await _is_admin(message.from_user.id):
@@ -1061,22 +1081,30 @@ async def admin_master_invite(message: Message, state: FSMContext) -> None:
             "У бота нет @username в Telegram. Задайте имя у @BotFather — без него deep-link не собрать."
         )
         return
+    settings = get_settings()
     raw = (message.text or "").strip()
-    parts = raw.split(maxsplit=1)
-    hint = parts[1].strip() if len(parts) > 1 else None
+    hint, ttl_minutes = _parse_master_invite_command_args(
+        raw, default_ttl_minutes=settings.master_invite_ttl_minutes
+    )
     _, url = await master_invite_service.create_invite_link(
         admin_user_id=message.from_user.id,
         bot_username=me.username,
         hint_name=hint,
+        ttl_minutes=ttl_minutes,
     )
-    await message.answer(
-        "Одноразовая ссылка для нового мастера (действует 7 дней, одно использование):\n"
-        f"{url}\n\n"
-        "Мастер открывает ссылку → при первом входе проходит регистрацию → в базе создаётся "
-        "новая строка masters и выдаётся роль master.\n"
-        "Строки вроде ilya из миграций — мок для теста бронирования; реальных мастеров удобнее заводить через эту ссылку.\n"
-        f"Подсказка для себя (необязательно): {hint or '—'}"
-    )
+    esc_url = html.escape(url)
+    lines = [
+        f"Одноразовая ссылка для нового мастера: <b>{ttl_minutes} мин</b>, одно использование.",
+        "",
+        "<b>Скопировать:</b> нажми на серый блок — в Telegram он обычно копируется одним касанием.",
+        f"<code>{esc_url}</code>",
+        "",
+    ]
+    if hint:
+        lines.append("")
+        lines.append(f"Подсказка в БД (hint_name): {html.escape(hint)}")
+    text = "\n".join(lines)
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("master_bind"))

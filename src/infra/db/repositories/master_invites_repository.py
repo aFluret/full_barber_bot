@@ -19,9 +19,9 @@ class MasterInvitesRepository:
         token: str,
         created_by_user_id: int,
         hint_name: str | None,
-        ttl_days: int = 7,
+        ttl_minutes: int = 15,
     ) -> None:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=int(ttl_minutes))
 
         def _op() -> None:
             client = get_supabase_client()
