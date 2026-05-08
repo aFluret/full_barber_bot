@@ -108,7 +108,7 @@ async def contact_admin_send(message: Message, state: FSMContext) -> None:
         )
         return
 
-    who = "мастера" if normalize_role(user.role if user else None) == ROLE_MASTER else "клиента"
+    who = "барбера" if normalize_role(user.role if user else None) == ROLE_MASTER else "клиента"
     notify_text = (
         f"💬 Новое сообщение от {who}\n\n"
         f"Имя: {user_name}\n"
