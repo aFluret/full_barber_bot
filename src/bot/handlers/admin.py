@@ -80,11 +80,17 @@ async def _is_admin(user_id: int) -> bool:
 
 
 async def _ensure_admin_mode(message: Message, state: FSMContext) -> bool:
-    current = await state.get_state()
-    if current == AdminPanelStates.in_menu.state:
-        return True
-    await message.answer("Ты не в админ-панели. Напиши /admin.")
-    return False
+    """Админ-меню показывается по роли админ может не вызывать /admin — переводим в панель по первому действию."""
+    await state.set_state(AdminPanelStates.in_menu)
+    return True
+
+
+async def _admin_callback_ok(callback: CallbackQuery, state: FSMContext) -> bool:
+    if not await _is_admin(callback.from_user.id):
+        await safe_callback_answer(callback, "Недостаточно прав.", show_alert=True)
+        return False
+    await state.set_state(AdminPanelStates.in_menu)
+    return True
 
 
 async def _delete_tracked_admin_inline_message(message: Message, state: FSMContext) -> None:
@@ -654,8 +660,7 @@ async def admin_branch_off(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin_master:refresh")
 async def admin_master_refresh(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     text, kb = await _masters_panel_text_and_keyboard()
     await _safe_edit_admin_panel(callback, text, reply_markup=kb)
@@ -664,8 +669,7 @@ async def admin_master_refresh(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(F.data.startswith("admin_master:toggle:"))
 async def admin_master_toggle(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     try:
         _, _, master_key, current = callback.data.split(":")
@@ -681,8 +685,7 @@ async def admin_master_toggle(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data.startswith("admin_master:set:"))
 async def admin_master_set_hours_preset(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     try:
         _, _, master_key, start_raw, end_raw = callback.data.split(":")
@@ -702,8 +705,7 @@ async def admin_master_set_hours_preset(callback: CallbackQuery, state: FSMConte
 
 @router.callback_query(F.data.startswith("admin_master:bindings:"))
 async def admin_master_bindings_open(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
@@ -733,8 +735,7 @@ async def admin_master_bindings_open(callback: CallbackQuery, state: FSMContext)
 
 @router.callback_query(F.data.startswith("admin_master:bind:"))
 async def admin_master_bindings_toggle(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     parts = callback.data.split(":")
     if len(parts) != 5:
@@ -777,8 +778,7 @@ async def admin_master_bindings_toggle(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "admin_branch:refresh")
 async def admin_branch_refresh(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     text, kb = await _branches_panel_text_and_keyboard()
     await _safe_edit_admin_panel(callback, text, reply_markup=kb)
@@ -787,8 +787,7 @@ async def admin_branch_refresh(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(F.data.startswith("admin_branch:toggle:"))
 async def admin_branch_toggle(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     try:
         _, _, branch_id_raw, current = callback.data.split(":")
@@ -1204,8 +1203,7 @@ async def admin_panel_fallback(message: Message) -> None:
 
 @router.callback_query(F.data == "admin_schedule:open_menu")
 async def admin_schedule_open_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     await _safe_edit_admin_panel(callback, "Что хочешь изменить?", reply_markup=_schedule_entry_keyboard())
     await safe_callback_answer(callback)
@@ -1213,8 +1211,7 @@ async def admin_schedule_open_menu(callback: CallbackQuery, state: FSMContext) -
 
 @router.callback_query(F.data == "admin_schedule:back_to_panel")
 async def admin_schedule_back_to_panel(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     await _safe_edit_admin_panel(callback, "Что хочешь изменить?", reply_markup=_schedule_entry_keyboard())
     await safe_callback_answer(callback)
@@ -1222,8 +1219,7 @@ async def admin_schedule_back_to_panel(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "admin_schedule:edit_days")
 async def admin_schedule_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     schedule = await work_schedule_repo.get_latest()
     selected_weekdays = (
@@ -1243,8 +1239,7 @@ async def admin_schedule_edit_days(callback: CallbackQuery, state: FSMContext) -
 
 @router.callback_query(F.data == "admin_schedule:edit_start")
 async def admin_schedule_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     schedule = await work_schedule_repo.get_latest()
     selected_weekdays = sorted(schedule.weekdays) if schedule else sorted(schedule_service.WORKING_WEEKDAYS)
@@ -1261,8 +1256,7 @@ async def admin_schedule_edit_start(callback: CallbackQuery, state: FSMContext) 
 
 @router.callback_query(F.data == "admin_schedule:edit_end")
 async def admin_schedule_edit_end(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AdminPanelStates.in_menu.state:
-        await safe_callback_answer(callback, "Сначала войдите в админ-панель через /admin", show_alert=True)
+    if not await _admin_callback_ok(callback, state):
         return
     schedule = await work_schedule_repo.get_latest()
     selected_weekdays = sorted(schedule.weekdays) if schedule else sorted(schedule_service.WORKING_WEEKDAYS)
