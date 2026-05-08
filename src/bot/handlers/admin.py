@@ -1042,7 +1042,7 @@ async def admin_panel_entry(message: Message, state: FSMContext) -> None:
         "/today — записи на сегодня\n"
         "/tomorrow — записи на завтра\n"
         "/all — все будущие записи\n\n"
-        "/no_show &lt;appointment_id&gt; — отметить запись как no-show\n\n"
+        # "/no_show &lt;appointment_id&gt; — отметить запись как no-show\n\n"
         "📊 Отчёты:\n"
         "/stats — базовая статистика (записи/выручка)\n"
         "/master_load — загрузка мастеров\n\n"
