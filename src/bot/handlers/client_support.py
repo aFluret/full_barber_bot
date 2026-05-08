@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from src.bot.callback_safe import safe_callback_answer
 from src.bot.handlers.states import SupportStates
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
+from src.infra.auth.roles import ROLE_MASTER, normalize_role
 from src.infra.config.settings import get_settings
 from src.infra.db.repositories.users_repository import UsersRepository
 
@@ -107,10 +108,10 @@ async def contact_admin_send(message: Message, state: FSMContext) -> None:
         )
         return
 
+    who = "мастера" if normalize_role(user.role if user else None) == ROLE_MASTER else "клиента"
     notify_text = (
-        "💬 Новое сообщение от клиента\n\n"
+        f"💬 Новое сообщение от {who}\n\n"
         f"Имя: {user_name}\n"
-        f"Telegram ID: {message.from_user.id}\n"
         f"Телефон: {user_phone}\n\n"
         f"Сообщение:\n{text}"
     )
