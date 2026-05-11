@@ -17,6 +17,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from src.app.services.booking_service import BookingService
 from src.app.services.master_invite_service import MasterInviteService
 from src.infra.auth.roles import ROLE_ADMIN, ROLE_MASTER, normalize_role
+from src.bot.handlers.master_onboarding import begin_master_onboarding
 from src.bot.handlers.states import RegistrationStates
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
 
@@ -79,19 +80,15 @@ async def start_command(message: Message, state: FSMContext) -> None:
         if token:
             ok, err, master = await invite_service.redeem(token, user_id)
             if ok and master:
-                await message.answer(
-                    f"Готово ✅ Ты подключён как мастер «{master.name}».\n"
-                    "Используй меню ниже — там твои записи и рабочие часы.",
-                    reply_markup=menu_keyboard_for_role(ROLE_MASTER),
-                )
+                await begin_master_onboarding(message, state, master_key=master.master_key)
             else:
+                await state.clear()
                 await message.answer(
                     "Не удалось принять приглашение: "
                     f"{_redeem_error_ru(err)}.\n"
                     "Напиши администратору.",
                     reply_markup=menu_keyboard_for_role(existing.role),
                 )
-            await state.clear()
             return
         await message.answer(
             _greeting_returning_user(existing.name, existing.role),
@@ -155,13 +152,10 @@ async def handle_name(message: Message, state: FSMContext) -> None:
 
     if pending:
         ok, err, master = await invite_service.redeem(pending, user_id)
-        await state.clear()
         if ok and master:
-            await message.answer(
-                f"Регистрация завершена ✅ Ты подключён как мастер «{master.name}».",
-                reply_markup=menu_keyboard_for_role(ROLE_MASTER),
-            )
+            await begin_master_onboarding(message, state, master_key=master.master_key)
         else:
+            await state.clear()
             await message.answer(
                 f"Регистрация прошла, но по приглашению не вышло стать мастером: {_redeem_error_ru(err)}.\n"
                 "Обратись к администратору — он может выдать доступ вручную.",

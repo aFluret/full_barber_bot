@@ -258,6 +258,27 @@ class MastersRepository:
 
         return await asyncio.to_thread(_op)
 
+    async def update_display_name(self, master_key: str, name: str) -> bool:
+        key = (master_key or "").strip()
+        label = (name or "").strip()
+        if not key or not label:
+            return False
+
+        def _op() -> bool:
+            client = get_supabase_client()
+            try:
+                res = (
+                    client.table("masters")
+                    .update({"name": label[:200]})
+                    .eq("master_key", key)
+                    .execute()
+                )
+                return bool(res.data)
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_op)
+
     async def list_branch_ids_by_master_key(self, master_key: str) -> List[int]:
         def _op() -> List[int]:
             client = get_supabase_client()

@@ -16,6 +16,7 @@ from src.bot.handlers.appointment import router as appointment_router
 from src.bot.handlers.booking import router as booking_router
 from src.bot.handlers.client_support import router as client_support_router
 from src.bot.handlers.master import router as master_router
+from src.bot.handlers.master_onboarding import router as master_onboarding_router
 from src.bot.handlers.start import router as start_router
 from src.app.services.reminder_service import ReminderService
 from src.infra.config.settings import get_settings
@@ -25,6 +26,7 @@ from src.infra.fsm.json_storage import JsonFSMStorage
 def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(storage=JsonFSMStorage(path=".data/fsm_state.json"))
     dispatcher.include_router(start_router)
+    dispatcher.include_router(master_onboarding_router)
     dispatcher.include_router(client_support_router)
     dispatcher.include_router(booking_router)
     dispatcher.include_router(appointment_router)
