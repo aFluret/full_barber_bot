@@ -11,6 +11,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from src.app.services.schedule_service import ScheduleService
 from src.infra.auth import ROLE_MASTER, is_master_role
 from src.infra.db.repositories.appointments_repository import AppointmentsRepository
 from src.infra.db.repositories.masters_repository import MastersRepository
@@ -162,9 +163,17 @@ async def master_show_hours(message: Message) -> None:
     if ctx is None:
         return
     _, master = ctx
+    if master.lunch_time is None:
+        lunch_line = "Обед: не задан (слоты как без перерыва)."
+    else:
+        le = (
+            datetime.combine(date.today(), master.lunch_time) + timedelta(minutes=ScheduleService.LUNCH_DURATION_MINUTES)
+        ).time()
+        lunch_line = f"Обед: {master.lunch_time.strftime('%H:%M')} — {le.strftime('%H:%M')}."
     await message.answer(
-        f"Сейчас: {master.work_start.strftime('%H:%M')} — {master.work_end.strftime('%H:%M')}\n\n"
-        "Чтобы изменить, отправь команду:\n"
+        f"Сейчас: {master.work_start.strftime('%H:%M')} — {master.work_end.strftime('%H:%M')}\n"
+        f"{lunch_line}\n\n"
+        "Чтобы изменить только окно смены (обед не сбросится), отправь:\n"
         "/my_hours 10:00 18:00"
     )
 

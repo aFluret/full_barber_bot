@@ -70,5 +70,6 @@ class MasterModel:
     name: str
     work_start: time
     work_end: time
+    lunch_time: Optional[time] = None
     is_active: bool = True
     telegram_user_id: Optional[int] = None

@@ -126,6 +126,13 @@ class BookingService:
             if master is not None:
                 if start_t < master.work_start or end_t > master.work_end:
                     continue
+                if master.lunch_time is not None:
+                    lunch_end = (
+                        datetime.combine(target_date, master.lunch_time)
+                        + timedelta(minutes=self._schedule_service.LUNCH_DURATION_MINUTES)
+                    ).time()
+                    if self._intervals_overlap(start_t, end_t, master.lunch_time, lunch_end):
+                        continue
 
             # Если выбираем "сегодня", скрываем уже начавшиеся слоты.
             if target_date == date.today():
@@ -254,6 +261,13 @@ class BookingService:
                     if master is not None:
                         if start_t < master.work_start or end_t > master.work_end:
                             continue
+                        if master.lunch_time is not None:
+                            lunch_end = (
+                                datetime.combine(cur, master.lunch_time)
+                                + timedelta(minutes=self._schedule_service.LUNCH_DURATION_MINUTES)
+                            ).time()
+                            if self._intervals_overlap(start_t, end_t, master.lunch_time, lunch_end):
+                                continue
                     if any(
                         self._intervals_overlap(start_t, end_t, o_start, o_end)
                         for o_start, o_end in occupied

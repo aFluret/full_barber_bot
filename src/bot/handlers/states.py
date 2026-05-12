@@ -59,5 +59,7 @@ class MasterOnboardingStates(StatesGroup):
     """Онбординг мастера после принятия приглашения: филиал → имя → график."""
     waiting_branch = State()
     waiting_display_name = State()
-    waiting_schedule = State()
+    waiting_schedule_start = State()
+    waiting_schedule_end = State()
+    waiting_schedule_lunch = State()
 

@@ -1,5 +1,5 @@
 """
-Онбординг мастера после принятия приглашения: филиал → имя для клиентов → рабочие часы в рамках графика барбершопа.
+Онбординг мастера после принятия приглашения: филиал → имя для клиентов → начало/конец смены и обед (кнопками).
 """
 
 from __future__ import annotations
@@ -23,10 +23,8 @@ masters_repo = MastersRepository()
 schedule_service = ScheduleService()
 
 ONB_MASTER_KEY = "onb_master_key"
-
-
-def _compact(t: time) -> str:
-    return t.strftime("%H%M")
+ONB_WORK_START = "onb_work_start"
+ONB_WORK_END = "onb_work_end"
 
 
 def _parse_compact(s: str) -> time | None:
@@ -38,43 +36,61 @@ def _parse_compact(s: str) -> time | None:
         return None
 
 
-def _schedule_preset_keyboard(shop_start: time, shop_end: time) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    ss, se = shop_start.strftime("%H:%M"), shop_end.strftime("%H:%M")
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=f"🕐 {ss}–{se} (как у барбершопа)",
-                callback_data=f"mon_onb:sc:{_compact(shop_start)}:{_compact(shop_end)}",
-            )
-        ]
-    )
+def _start_time_options(shop_start: time, shop_end: time, step_minutes: int = 30) -> list[str]:
     base = datetime.combine(date.today(), shop_start)
+    end_limit = datetime.combine(date.today(), shop_end) - timedelta(minutes=step_minutes)
+    out: list[str] = []
+    cur = base
+    while cur <= end_limit:
+        out.append(cur.strftime("%H:%M"))
+        cur += timedelta(minutes=step_minutes)
+    return out
+
+
+def _end_time_options(work_start: time, shop_end: time, step_minutes: int = 30) -> list[str]:
+    start_base = datetime.combine(date.today(), work_start)
     end_base = datetime.combine(date.today(), shop_end)
-    duration_h = (end_base - base).total_seconds() / 3600.0 if end_base > base else 0.0
+    out: list[str] = []
+    cur = start_base + timedelta(minutes=step_minutes)
+    while cur <= end_base:
+        out.append(cur.strftime("%H:%M"))
+        cur += timedelta(minutes=step_minutes)
+    return out
 
-    if duration_h >= 8:
-        early_end = (base + timedelta(hours=8)).time()
-        if early_end <= shop_end and early_end > shop_start:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"{ss}–{early_end.strftime('%H:%M')} (8 ч от открытия)",
-                        callback_data=f"mon_onb:sc:{_compact(shop_start)}:{_compact(early_end)}",
-                    )
-                ]
-            )
-        late_start = (end_base - timedelta(hours=8)).time()
-        if late_start >= shop_start and late_start < shop_end:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"{late_start.strftime('%H:%M')}–{se} (8 ч до закрытия)",
-                        callback_data=f"mon_onb:sc:{_compact(late_start)}:{_compact(shop_end)}",
-                    )
-                ]
-            )
 
+def _lunch_start_options(work_start: time, work_end: time, lunch_duration_minutes: int) -> list[str]:
+    start_base = datetime.combine(date.today(), work_start)
+    end_limit = datetime.combine(date.today(), work_end) - timedelta(minutes=lunch_duration_minutes)
+    out: list[str] = []
+    cur = start_base
+    while cur <= end_limit:
+        out.append(cur.strftime("%H:%M"))
+        cur += timedelta(minutes=30)
+    return out
+
+
+def _time_grid_keyboard(times: list[str], *, kind: str) -> InlineKeyboardMarkup:
+    """kind: ws | we | lt — префикс в callback_data."""
+    step = 3
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(times), step):
+        chunk = times[i : i + step]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=t,
+                    callback_data=f"mon_onb:{kind}:{datetime.strptime(t, '%H:%M').strftime('%H%M')}",
+                )
+                for t in chunk
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _lunch_keyboard(times: list[str]) -> InlineKeyboardMarkup:
+    kb = _time_grid_keyboard(times, kind="lt")
+    rows = list(kb.inline_keyboard)
+    rows.append([InlineKeyboardButton(text="Без обеда", callback_data="mon_onb:ln")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -176,47 +192,181 @@ async def onb_display_name(message: Message, state: FSMContext) -> None:
         await message.answer("Не удалось сохранить имя. Попробуй ещё раз или напиши администратору.")
         return
 
-    await state.set_state(MasterOnboardingStates.waiting_schedule)
+    await state.set_state(MasterOnboardingStates.waiting_schedule_start)
     sched = await schedule_service.get_effective_schedule()
+    opts = _start_time_options(sched.start_time, sched.end_time)
+    if not opts:
+        await message.answer(
+            "Окно барбершопа слишком короткое для приёма. Напиши администратору.",
+            reply_markup=master_menu_keyboard(),
+        )
+        await state.clear()
+        return
     intro = (
-        f"График барбершопа для слотов: {sched.start_time.strftime('%H:%M')}–{sched.end_time.strftime('%H:%M')}.\n"
-        "Выбери свои часы приёма (внутри этого окна):"
+        f"График барбершопа для слотов: {sched.start_time.strftime('%H:%M')}–{sched.end_time.strftime('%H:%M')}.\n\n"
+        "Выбери время начала работы:"
     )
-    await message.answer(intro, reply_markup=_schedule_preset_keyboard(sched.start_time, sched.end_time))
+    await message.answer(intro, reply_markup=_time_grid_keyboard(opts, kind="ws"))
 
 
-@router.callback_query(MasterOnboardingStates.waiting_schedule, F.data.startswith("mon_onb:sc:"))
-async def onb_pick_schedule(callback: CallbackQuery, state: FSMContext) -> None:
+async def _load_onb_master(callback: CallbackQuery, state: FSMContext) -> tuple[str, object] | None:
     data = await state.get_data()
     master_key = str(data.get(ONB_MASTER_KEY) or "")
+    if not master_key:
+        await safe_callback_answer(callback, "Сессия устарела. Нажми /start.", show_alert=True)
+        return None
     m = await masters_repo.get_by_key(master_key)
     if m is None or m.telegram_user_id != callback.from_user.id:
         await safe_callback_answer(callback, "Нет доступа.", show_alert=True)
         await state.clear()
+        return None
+    return master_key, m
+
+
+@router.callback_query(MasterOnboardingStates.waiting_schedule_start, F.data.startswith("mon_onb:ws:"))
+async def onb_pick_work_start(callback: CallbackQuery, state: FSMContext) -> None:
+    ctx = await _load_onb_master(callback, state)
+    if not ctx:
         return
+    master_key, _m = ctx
     parts = callback.data.split(":")
-    if len(parts) != 4:
+    if len(parts) != 3:
         await safe_callback_answer(callback, "Некорректная команда.", show_alert=True)
         return
     st = _parse_compact(parts[2])
-    en = _parse_compact(parts[3])
-    if st is None or en is None or st >= en:
+    if st is None:
         await safe_callback_answer(callback, "Некорректное время.", show_alert=True)
         return
     sched = await schedule_service.get_effective_schedule()
-    if st < sched.start_time or en > sched.end_time:
-        await safe_callback_answer(
-            callback,
-            f"Выбери интервал не шире {sched.start_time.strftime('%H:%M')}–{sched.end_time.strftime('%H:%M')}.",
-            show_alert=True,
-        )
+    if st < sched.start_time or st > sched.end_time:
+        await safe_callback_answer(callback, "Время вне графика барбершопа.", show_alert=True)
         return
-    if not await masters_repo.set_work_hours(master_key, st, en):
+    last_allowed = (
+        datetime.combine(date.today(), sched.end_time) - timedelta(minutes=30)
+    ).time()
+    if st > last_allowed:
+        await safe_callback_answer(callback, "Слишком позднее начало для этого окна.", show_alert=True)
+        return
+
+    await state.update_data(**{ONB_WORK_START: st.strftime("%H:%M")})
+    await state.set_state(MasterOnboardingStates.waiting_schedule_end)
+    ends = _end_time_options(st, sched.end_time)
+    if not ends:
+        await safe_callback_answer(callback, "Нет доступного окончания смены.", show_alert=True)
+        return
+    await safe_callback_answer(callback)
+    await callback.message.answer(
+        f"Начало: {st.strftime('%H:%M')} ✓\nВыбери время окончания работы:",
+        reply_markup=_time_grid_keyboard(ends, kind="we"),
+    )
+
+
+@router.callback_query(MasterOnboardingStates.waiting_schedule_end, F.data.startswith("mon_onb:we:"))
+async def onb_pick_work_end(callback: CallbackQuery, state: FSMContext) -> None:
+    ctx = await _load_onb_master(callback, state)
+    if not ctx:
+        return
+    data = await state.get_data()
+    start_s = data.get(ONB_WORK_START)
+    if not start_s:
+        await safe_callback_answer(callback, "Сначала выбери начало работы.", show_alert=True)
+        return
+    start_t = datetime.strptime(str(start_s), "%H:%M").time()
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await safe_callback_answer(callback, "Некорректная команда.", show_alert=True)
+        return
+    end_t = _parse_compact(parts[2])
+    if end_t is None or end_t <= start_t:
+        await safe_callback_answer(callback, "Некорректное окончание.", show_alert=True)
+        return
+    sched = await schedule_service.get_effective_schedule()
+    if end_t > sched.end_time or start_t < sched.start_time:
+        await safe_callback_answer(callback, "Интервал должен быть внутри графика барбершопа.", show_alert=True)
+        return
+
+    await state.update_data(**{ONB_WORK_END: end_t.strftime("%H:%M")})
+    await state.set_state(MasterOnboardingStates.waiting_schedule_lunch)
+    lunch_opts = _lunch_start_options(start_t, end_t, schedule_service.LUNCH_DURATION_MINUTES)
+    await safe_callback_answer(callback)
+    await callback.message.answer(
+        f"Смена: {start_t.strftime('%H:%M')}–{end_t.strftime('%H:%M')} ✓\n"
+        f"Выбери начало обеда (перерыв {schedule_service.LUNCH_DURATION_MINUTES} мин) или «Без обеда».",
+        reply_markup=_lunch_keyboard(lunch_opts),
+    )
+
+
+async def _finish_schedule(
+    callback: CallbackQuery,
+    state: FSMContext,
+    master_key: str,
+    start_t: time,
+    end_t: time,
+    lunch_time: time | None,
+) -> None:
+    if not await masters_repo.set_work_schedule(master_key, start_t, end_t, lunch_time):
         await safe_callback_answer(callback, "Не удалось сохранить график.", show_alert=True)
         return
     await state.clear()
+    if lunch_time is None:
+        lunch_line = "Обед: без перерыва."
+    else:
+        le = (
+            datetime.combine(date.today(), lunch_time)
+            + timedelta(minutes=schedule_service.LUNCH_DURATION_MINUTES)
+        ).time()
+        lunch_line = f"Обед: {lunch_time.strftime('%H:%M')}–{le.strftime('%H:%M')}."
     await safe_callback_answer(callback, "Сохранено!")
     await callback.message.answer(
-        "Настройка завершена ✅ Добро пожаловать в кабинет мастера!",
+        f"Настройка завершена ✅ Добро пожаловать в кабинет мастера!\n{lunch_line}",
         reply_markup=master_menu_keyboard(),
     )
+
+
+@router.callback_query(MasterOnboardingStates.waiting_schedule_lunch, F.data == "mon_onb:ln")
+async def onb_pick_lunch_none(callback: CallbackQuery, state: FSMContext) -> None:
+    ctx = await _load_onb_master(callback, state)
+    if not ctx:
+        return
+    master_key, _ = ctx
+    data = await state.get_data()
+    start_s, end_s = data.get(ONB_WORK_START), data.get(ONB_WORK_END)
+    if not start_s or not end_s:
+        await safe_callback_answer(callback, "Недостаточно данных. Начни с шага «имя».", show_alert=True)
+        return
+    start_t = datetime.strptime(str(start_s), "%H:%M").time()
+    end_t = datetime.strptime(str(end_s), "%H:%M").time()
+    await _finish_schedule(callback, state, master_key, start_t, end_t, None)
+
+
+@router.callback_query(MasterOnboardingStates.waiting_schedule_lunch, F.data.startswith("mon_onb:lt:"))
+async def onb_pick_lunch_start(callback: CallbackQuery, state: FSMContext) -> None:
+    ctx = await _load_onb_master(callback, state)
+    if not ctx:
+        return
+    master_key, _ = ctx
+    data = await state.get_data()
+    start_s, end_s = data.get(ONB_WORK_START), data.get(ONB_WORK_END)
+    if not start_s or not end_s:
+        await safe_callback_answer(callback, "Недостаточно данных.", show_alert=True)
+        return
+    work_start = datetime.strptime(str(start_s), "%H:%M").time()
+    work_end = datetime.strptime(str(end_s), "%H:%M").time()
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await safe_callback_answer(callback, "Некорректная команда.", show_alert=True)
+        return
+    lunch_t = _parse_compact(parts[2])
+    if lunch_t is None:
+        await safe_callback_answer(callback, "Некорректное время.", show_alert=True)
+        return
+    lunch_end = (
+        datetime.combine(date.today(), lunch_t) + timedelta(minutes=schedule_service.LUNCH_DURATION_MINUTES)
+    ).time()
+    if lunch_t < work_start or lunch_end > work_end:
+        await safe_callback_answer(callback, "Обед должен укладываться в твою смену.", show_alert=True)
+        return
+
+    await _finish_schedule(callback, state, master_key, work_start, work_end, lunch_t)

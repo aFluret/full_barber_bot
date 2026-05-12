@@ -17,12 +17,6 @@
       "admin_inline_message_id": null
     }
   },
-  "8663335192:424666580:424666580:0::default": {
-    "state": "AdminPanelStates:in_menu",
-    "data": {
-      "admin_inline_message_id": null
-    }
-  },
   "8663335192:8738342926:8738342926:0::default": {
     "state": "BookingStates:waiting_master",
     "data": {

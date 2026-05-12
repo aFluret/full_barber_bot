@@ -18,7 +18,7 @@ from src.infra.db.models import MasterModel
 from src.infra.db.supabase_client import get_supabase_client
 
 
-_SELECT = "id,master_key,name,work_start,work_end,is_active,telegram_user_id"
+_SELECT = "id,master_key,name,work_start,work_end,lunch_time,is_active,telegram_user_id"
 
 
 class MastersRepository:
@@ -31,12 +31,17 @@ class MastersRepository:
     def _row_to_model(cls, row: dict) -> MasterModel:
         tid = row.get("telegram_user_id")
         telegram_user_id = int(tid) if tid is not None else None
+        lunch_raw = row.get("lunch_time")
+        lunch_t: time | None = None
+        if lunch_raw is not None and str(lunch_raw).strip():
+            lunch_t = cls._parse_time(lunch_raw, "12:00")
         return MasterModel(
             id=int(row["id"]),
             master_key=str(row.get("master_key") or f"m{int(row['id'])}"),
             name=str(row.get("name") or ""),
             work_start=cls._parse_time(row.get("work_start"), "10:00"),
             work_end=cls._parse_time(row.get("work_end"), "18:00"),
+            lunch_time=lunch_t,
             is_active=bool(row.get("is_active", True)),
             telegram_user_id=telegram_user_id,
         )
@@ -53,6 +58,7 @@ class MastersRepository:
                     name=name,
                     work_start=time(10, 0),
                     work_end=time(18, 0),
+                    lunch_time=None,
                     is_active=True,
                     telegram_user_id=None,
                 )
@@ -244,11 +250,36 @@ class MastersRepository:
         return await asyncio.to_thread(_op)
 
     async def set_work_hours(self, master_key: str, work_start: time, work_end: time) -> bool:
+        """Обновить только окно работы; время обеда не меняет."""
         def _op() -> bool:
             client = get_supabase_client()
             payload = {
                 "work_start": work_start.strftime("%H:%M:%S"),
                 "work_end": work_end.strftime("%H:%M:%S"),
+            }
+            try:
+                res = client.table("masters").update(payload).eq("master_key", master_key).execute()
+                return bool(res.data)
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_op)
+
+    async def set_work_schedule(
+        self,
+        master_key: str,
+        work_start: time,
+        work_end: time,
+        lunch_time: time | None,
+    ) -> bool:
+        """Окно работы и обед (60 мин от lunch_time); None — без обеда."""
+
+        def _op() -> bool:
+            client = get_supabase_client()
+            payload = {
+                "work_start": work_start.strftime("%H:%M:%S"),
+                "work_end": work_end.strftime("%H:%M:%S"),
+                "lunch_time": lunch_time.strftime("%H:%M:%S") if lunch_time is not None else None,
             }
             try:
                 res = client.table("masters").update(payload).eq("master_key", master_key).execute()
